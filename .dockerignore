@@ -1,0 +1,10 @@
+ollama_cache/
+aegis_db.duckdb
+*.csv
+logs/
+target/
+.git/
+.venv/
+models_artifacts/
+models/
+compliance_logs/

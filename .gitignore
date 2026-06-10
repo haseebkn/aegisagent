@@ -1,0 +1,60 @@
+# --- Python Bytecode & Environments ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+env/
+
+# --- Large Datasets & Databases ---
+*.csv
+*.tsv
+*.xlsx
+*.duckdb
+*.db
+*.sqlite
+
+# --- Confidential Compliance Records ---
+# Compliance logs contain generated STRs with sensitive user data (card numbers, names, locations)
+compliance_logs/
+compliance_logs/*
+
+# --- Machine Learning Models & Cache ---
+# Large binary model checkpoints and cached parameters
+models_artifacts/
+ollama_cache/
+*.joblib
+*.pkl
+*.pb
+*.onnx
+*.h5
+
+# --- DBT (Data Build Tool) Artifacts ---
+# DBT logs and compiled SQL target models
+target/
+logs/
+profiles.yml
+
+# --- Terraform State & Secrets ---
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+*.tfvars.json
+
+# --- Credentials & Configs ---
+.env
+.env.*
+.user.yml
+secrets.json
+*credentials*
+*.key
+*.pem
+
+# --- OS & IDE Metadata ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

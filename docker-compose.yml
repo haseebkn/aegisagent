@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  aegis_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aegis_app
+    environment:
+      - DBT_DB_PATH=/app/aegis_db.duckdb
+      - DBT_PROFILES_DIR=/app
+      - MODELS_ARTIFACTS_DIR=/app/models/
+      - COMPLIANCE_LOGS_DIR=/app/compliance_logs/
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - .:/app
+      - ./aegis_db.duckdb:/app/aegis_db.duckdb
+      - ./compliance_logs:/app/compliance_logs
+      - ~/.aws:/root/.aws:ro
+    networks:
+      - aegis_net
+    command: tail -f /dev/null
+    restart: unless-stopped
+
+networks:
+  aegis_net:
+    driver: bridge

@@ -1,0 +1,18 @@
+version: 2
+
+models:
+  - name: fct_fraud_features
+    columns:
+      - name: trans_num
+        tests:
+          - unique
+          - not_null
+      - name: distance_km
+        tests:
+          - not_null
+      - name: txns_24h
+        tests:
+          - not_null
+      - name: txns_7d
+        tests:
+          - not_null
