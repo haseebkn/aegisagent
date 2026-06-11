@@ -1,43 +1,47 @@
-# AegisAgent Compliance Dashboard
+# AegisAgent: Serverless AI Compliance & MLOps Platform
 
-AegisAgent is a secure, serverless compliance auditing platform designed to automate the detection of financial transaction anomalies and generate regulatory-compliant **Suspicious Transaction Report (STR)** narratives. 
+AegisAgent is a secure, serverless Agent-as-a-Service (AaaS) platform designed to automate the detection of financial transaction anomalies and generate regulatory-compliant **Suspicious Transaction Report (STR)** narratives. 
 
-Built with security and compliance in mind, AegisAgent conforms to FINTRAC and general anti-money laundering (AML) data-retention standards.
+Built for enterprise-grade RegTech environments, AegisAgent seamlessly merges a multi-model machine learning ensemble with a guardrailed generative AI agent, strictly conforming to FINTRAC and PCMLTFA AML data-retention standards.
 
 ---
 
-## 🚀 Key Features
+## 🚀 Core Capabilities
 
-* **AI-Generated STR Narratives:** Integrates with **AWS Bedrock (Claude)** to translate statistical transaction anomalies into high-quality, structured STRs covering the *Who, What, When, Where, Why,* and *How* of suspicious activities.
-* **Immutable S3 Compliance Data Lake:** Implements a strict Write-Once-Read-Many (**WORM**) Object Lock configuration on AWS S3 to prevent data tampering, fulfilling regulatory requirements for record integrity (5-year retention).
-* **Robust Feature Engineering:** Utilizes **DBT (Data Build Tool)** and **DuckDB** to generate advanced velocity and transaction frequency metrics.
-* **Premium Custom Dashboard:** A Streamlit interface styled with custom dark-mode aesthetics, responsive visual cards, and clear typography.
+* **Stacking Ensemble ML Classifier:** Evaluates transactions dynamically using a stacked architecture of Geographic Random Forests, Category-specific XGBoost models, and Velocity Random Forests, culminating in a highly calibrated Meta-Score.
+* **Agentic Guardrails & LLM Orchestration:** Integrates with **AWS Bedrock (Claude Haiku 4.5)** to translate statistical anomalies into structured STRs. Implements a programmatic regex-validation loop that intercepts speculative language (e.g., "may", "might", "could") and forces LLM retries to ensure 100% definitive, objective regulatory reporting.
+* **Immutable S3 Compliance Data Lake:** Configured with strict Write-Once-Read-Many (**WORM**) AWS Object Lock and automated lifecycle tiering to Glacier, physically preventing data tampering and fulfilling the 5-year regulatory retention mandate.
+* **Production MLOps Pipeline:** Features strict runtime input validation via **Pydantic**, automated model artifact versioning (`v_YYYYMMDD_HHMMSS`), and persistent JSON telemetry tracking for every training lifecycle.
+* **Premium Investigator Dashboard:** A Streamlit interface styled with custom dark-mode aesthetics, surfacing real-time model telemetry, feature weights, and immediate Markdown renderings of the Bedrock STRs.
 
 ---
 
 ## 🛠️ Technology Stack
 
-* **Frontend Dashboard:** Streamlit (with customized CSS/HTML elements)
-* **Data Processing & Database:** DBT Core + DuckDB (embedded OLAP database)
-* **Infrastructure as Code (IaC):** Terraform
-* **AI Orchestration:** Anthropic Claude (via AWS Bedrock)
-* **Serverless Compute:** AWS ECS Fargate + ECR (Dockerized deployment)
+* **Machine Learning & AI:** Scikit-Learn, XGBoost, AWS Bedrock (Anthropic Claude), Pydantic
+* **Data Engineering:** dbt (Data Build Tool), DuckDB (Embedded OLAP)
+* **Frontend Visualization:** Streamlit 
+* **Infrastructure as Code (IaC):** Terraform (with S3/DynamoDB Remote State Locking)
+* **Cloud & CI/CD:** AWS ECS Fargate, ECR, Docker, custom bash deployment orchestration
 
 ---
 
-## 🏛️ Architecture & Security Design
+## 🏛️ Cloud Architecture & Security Design
 
-AegisAgent enforces enterprise-level security protocols out of the box:
-1. **Zero Hardcoded Keys:** Task configurations use IAM Roles and Policies to request temporary AWS Bedrock and S3 access tokens dynamically.
-2. **Network Isolation:** Resources run in an isolated VPC with restricted ingress/egress rules via AWS Security Groups.
-3. **Data Protection:** Standard AES256 server-side encryption blocks public access to S3 buckets.
+AegisAgent enforces enterprise-level infrastructure security:
+1. **Automated CI/CD:** A unified `deploy.sh` script automatically authenticates AWS credentials, builds the optimized local Docker container, and pushes it to Elastic Container Registry (ECR).
+2. **Zero Hardcoded Keys:** AWS Fargate task configurations utilize IAM Roles to request temporary, least-privilege AWS Bedrock and S3 access tokens dynamically.
+3. **Network Isolation:** Resources execute inside an isolated VPC with restricted ingress/egress rules via AWS Security Groups.
+4. **State Protection:** Terraform state is managed remotely in an encrypted S3 bucket and locked via DynamoDB to prevent concurrent pipeline corruption.
 
 ---
 
 ## 💻 Local Setup & Execution
 
 ### 1. Prerequisites
-Ensure you have Python 3.10+ installed.
+* Python 3.10+
+* Docker Desktop (for containerized execution)
+* AWS CLI configured with active credentials
 
 ### 2. Installation
 Clone this repository and set up a virtual environment:
@@ -49,27 +53,6 @@ cd aegisagent
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
+# Install strictly pinned dependencies
 pip install -r requirements.txt
 ```
-
-### 3. Run the Streamlit Dashboard
-Launch the web application locally:
-```bash
-streamlit run app.py
-```
-Open [http://localhost:8501](http://localhost:8501) in your browser.
-
----
-
-## 🌐 Deploying to AWS
-
-Initialize and deploy the infrastructure using Terraform:
-```bash
-cd terraform
-terraform init
-terraform plan
-terraform apply
-```
-
-This constructs the isolated VPC, ECR registry, ECS cluster, S3 compliance bucket, and execution policies automatically.
