@@ -10,6 +10,11 @@ seed-paths: ["seeds"]
 analysis-paths: ["analyses"]
 macro-paths: ["macros"]
 
+# Location of fraudTrain.csv / fraudTest.csv. Override per environment with
+#   dbt run --vars '{raw_data_dir: /app}'
+vars:
+  raw_data_dir: "{{ env_var('AEGIS_RAW_DATA_DIR', '.') }}"
+
 clean-targets:
   - "target"
   - "dbt_packages"

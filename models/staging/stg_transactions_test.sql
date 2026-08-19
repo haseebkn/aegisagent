@@ -23,7 +23,7 @@ WITH raw_data AS (
         merch_lat,
         merch_long,
         is_fraud
-    FROM read_csv_auto('e:/AegisAgent/fraudTest.csv')
+    FROM read_csv_auto('{{ var("raw_data_dir") }}/fraudTest.csv')
 )
 SELECT
     *,

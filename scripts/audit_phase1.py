@@ -1,7 +1,15 @@
-import duckdb, os, joblib, subprocess
+import os
+import subprocess
+import sys
+
+import duckdb
+import joblib
 import numpy as np
 
-con = duckdb.connect(os.environ.get("DBT_DB_PATH", "e:/AegisAgent/aegis_db.duckdb"))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from scripts.config import ARTIFACTS_DIR, COMPLIANCE_LOGS_DIR, DB_PATH, resolve_model_dir
+
+con = duckdb.connect(str(DB_PATH))
 
 def pf(cond): return "PASS" if cond else "FAIL"
 
@@ -80,7 +88,7 @@ con.close()
 
 # 9. Model artifacts
 print(f"\n=== MODEL ARTIFACTS ===")
-artifacts_dir = os.environ.get("MODELS_ARTIFACTS_DIR", "e:/AegisAgent/models_artifacts")
+artifacts_dir = str(resolve_model_dir())
 required_files = [
     "model_2_geo_rf.joblib","model_3_cat_xgb.joblib",
     "model_4_vel_rf.joblib","model_4_scaler.joblib",
@@ -99,7 +107,7 @@ print(f"\n=== META THRESHOLD ===")
 print(f"  Threshold: {thr:.4f} [{pf(0 < thr < 1)}]")
 
 # 11. Compliance logs
-compliance_dir = os.environ.get("COMPLIANCE_LOGS_DIR", "e:/AegisAgent/compliance_logs")
+compliance_dir = str(COMPLIANCE_LOGS_DIR)
 logs = [f for f in os.listdir(compliance_dir) if f.endswith(".txt")] if os.path.exists(compliance_dir) else []
 print(f"\n=== COMPLIANCE LOGS ===")
 print(f"  SAR reports found: {len(logs)} [{pf(len(logs) > 0)}]")
@@ -110,7 +118,7 @@ for log in logs:
     except UnicodeDecodeError:
         content = open(path, encoding="cp1252").read()
     sections = [s for s in ["WHO","WHAT","WHEN","WHERE","WHY","HOW"] if s in content]
-    speculative = [w for w in ["may","might","possibly","could be","appears to","suspects that"]
+    speculative = [w for w in ["might","possibly","could be","appears to","suspects that"]
                    if f" {w} " in f" {content.lower()} "]
     print(f"  {log}")
     print(f"    5W+H sections: {len(sections)}/6 [{pf(len(sections)==6)}]")

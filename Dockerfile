@@ -1,25 +1,35 @@
 FROM python:3.11-slim
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy requirements and install
+# Dependencies first so application edits do not bust the layer cache.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt dbt-core dbt-duckdb
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy project files
-COPY . .
+# Application code, dbt project, and model artifacts.
+COPY dbt_project.yml profiles.yml app.py ./
+COPY models/ ./models/
+COPY scripts/ ./scripts/
+COPY tests/ ./tests/
+COPY models_artifacts/ ./models_artifacts/
 
-# Set default env variables for container paths
-ENV DBT_DB_PATH=/app/aegis_db.duckdb
-ENV DBT_PROFILES_DIR=/app
-ENV MODELS_ARTIFACTS_DIR=/app/models/
-ENV COMPLIANCE_LOGS_DIR=/app/compliance_logs/
+# Paths resolve relative to the repo root by default (see scripts/config.py); these
+# are set explicitly so the values are visible in `docker inspect`.
+ENV DBT_DB_PATH=/app/aegis_db.duckdb \
+    DBT_PROFILES_DIR=/app \
+    AEGIS_RAW_DATA_DIR=/app \
+    MODELS_ARTIFACTS_DIR=/app/models_artifacts \
+    COMPLIANCE_LOGS_DIR=/app/compliance_logs \
+    PYTHONPATH=/app
 
-# Default CMD (runs verification)
+RUN mkdir -p /app/compliance_logs
+
+# The DuckDB file is data, not code: mount it at runtime.
+#   docker run -v "$PWD/aegis_db.duckdb:/app/aegis_db.duckdb" aegis-app:latest
+VOLUME ["/app/compliance_logs"]
+
 CMD ["python", "scripts/verify_pipeline.py"]

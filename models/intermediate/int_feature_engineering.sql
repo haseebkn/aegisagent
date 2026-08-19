@@ -106,7 +106,17 @@ SELECT
     card_txn_cnt,
     card_mean_amt,
     card_std_amt,
-    -- Relative amt features
-    (amt - card_mean_amt) / (card_std_amt + 1e-6) AS amt_z_card,
-    amt / (card_mean_amt + 1e-6) AS amt_over_mean_card
+    -- Relative amt features.
+    -- Cards with no prior history have card_mean_amt = card_std_amt = 0. Dividing by
+    -- an epsilon there produced z-scores in the billions, which were rendered into
+    -- the STR prompt as established fact. Emit the neutral value instead, and floor
+    -- the denominators at $1 so a genuinely low-variance card cannot blow up either.
+    CASE
+        WHEN card_txn_cnt = 0 THEN 0.0
+        ELSE (amt - card_mean_amt) / GREATEST(card_std_amt, 1.0)
+    END AS amt_z_card,
+    CASE
+        WHEN card_txn_cnt = 0 THEN 1.0
+        ELSE amt / GREATEST(card_mean_amt, 1.0)
+    END AS amt_over_mean_card
 FROM joined
