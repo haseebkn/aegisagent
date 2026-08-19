@@ -14,6 +14,8 @@ macro-paths: ["macros"]
 #   dbt run --vars '{raw_data_dir: /app}'
 vars:
   raw_data_dir: "{{ env_var('AEGIS_RAW_DATA_DIR', '.') }}"
+  # Full Kaggle dataset. CI overrides this for the small fixture.
+  expected_row_count: 1852394
 
 clean-targets:
   - "target"
@@ -24,6 +26,9 @@ models:
     staging:
       +materialized: view
     intermediate:
+      # Views, deliberately. Materialising these as tables was measured at 36.8s
+      # against 27.6s for the fused view chain -- DuckDB optimises the whole
+      # pipeline better than it optimises the pieces. See docs/materialization.md.
       +materialized: view
     marts:
       +materialized: table

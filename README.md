@@ -21,21 +21,27 @@ Measured on the held-out test split (`fraudTest.csv`, 555,719 transactions,
 
 | Metric | Value |
 |---|---|
-| **PR AUC (meta)** | **0.8010** |
-| ROC AUC (meta) | 0.9941 |
-| Precision | 84.8% |
-| Recall | 69.8% |
-| F1 | 0.766 |
-| Frauds caught | 1,497 / 2,145 |
-| Alert volume | 1,765 over 193 days (**9.1/day**) |
-| Decision threshold | 0.5832 |
+| **PR AUC (meta)** | **0.7823** |
+| ROC AUC (meta) | 0.9912 |
+| Precision | 85.9% |
+| Recall | 67.9% |
+| F1 | 0.759 |
+| Frauds caught | 1,457 / 2,145 |
+| Alert volume | 1,696 over 193 days (**8.79/day**) |
+| Decision threshold | 0.6152 |
 
 **PR AUC is the headline number.** At 0.39% prevalence a ROC AUC of 0.99 is not
 impressive on its own — a model can rank well and still drown an investigations team
 in false positives. Alert volume per day is reported for the same reason.
 
-Base models (test ROC AUC / PR AUC): Model 2 geographic RF 0.9816 / 0.7679 ·
-Model 3 category XGBoost 0.9874 / 0.7157 · Model 4 velocity RF 0.9909 / 0.7974.
+Base models (test ROC AUC / PR AUC): Model 2 geographic RF 0.9788 / 0.7548 ·
+Model 3 category XGBoost 0.9816 / 0.6931 · Model 4 velocity RF 0.9887 / 0.7911.
+
+These are *lower* than an earlier revision of this README reported (meta PR AUC
+0.8010). Target encodings moved from in-sample to out-of-fold, which is the correct
+construction and costs about 2.3% here because every encoded level is densely
+observed. The full comparison and reasoning is in
+[docs/target-encoding.md](docs/target-encoding.md).
 
 ---
 
@@ -50,10 +56,11 @@ fraudTest.csv  ─┘   (staging →          (27 columns,        (RF + XGBoost 
 ```
 
 **Feature layer (dbt → DuckDB).** Staging views read the raw CSVs; intermediate
-models derive Haversine distance from home, cyclical hour encodings, category /
-state / merchant target encodings, per-card spend statistics and trailing 24h/7d
-transaction velocity. The mart `fct_fraud_features` is the single contract the
-models consume.
+models derive Haversine distance from home, cyclical hour encodings, **out-of-fold
+smoothed** category / state / merchant target encodings, per-card spend statistics
+and trailing 24h/7d transaction velocity. The mart `fct_fraud_features` is the single
+contract the models consume. Intermediates are views by measurement, not by default —
+materializing them is 33% slower ([docs/materialization.md](docs/materialization.md)).
 
 **Model layer.** Three base learners (geographic RF, category XGBoost, velocity RF)
 feed a logistic-regression meta-learner. Split discipline is chronological
@@ -118,6 +125,7 @@ raw CSVs are data and are mounted at runtime.
 |---|---|
 | `python scripts/evaluate.py --alert-budget 10` | PR AUC by model, operating points across the threshold range, cost-minimising threshold, and the threshold implied by an alert budget. |
 | `python scripts/drift.py --fail-on-significant` | PSI + KS between the training and scoring windows. Exits non-zero on significant drift, so it can gate a scoring run. |
+| `python scripts/calibration.py` | Brier, ECE/MCE and reliability, reported separately for the alerting region. |
 | `python scripts/graph_signal.py` | Bipartite graph density and univariate power of the entity features. |
 
 ### Threshold selection is a business decision
@@ -128,11 +136,29 @@ F1-optimal threshold is **not** cost-optimal:
 
 | | Threshold | Alerts/day | Precision | Recall | Total cost |
 |---|---|---|---|---|---|
-| Deployed (F1-optimal) | 0.5832 | 9.1 | 84.8% | 69.8% | $241,907 |
-| Cost-minimising | 0.0138 | 19.8 | 46.8% | 83.3% | **$151,300** |
+| Deployed (F1-optimal) | 0.6152 | 8.8 | 85.9% | 67.9% | $257,826 |
+| Cost-minimising | 0.0570 | 14.7 | 59.2% | 78.3% | **$162,769** |
 
-Roughly $90k less loss over 193 days, bought with ~11 more alerts per day. Which
-one is right depends on staffing, not on the model — which is the point.
+Roughly $95k less loss over 193 days, bought with ~6 more alerts per day. Which one
+is right depends on staffing, not on the model — which is the point.
+
+### Calibration
+
+`calibration.py` measures what an earlier revision of this README simply asserted.
+Aggregate ECE is 0.0009, which looks excellent and means almost nothing: 99.6% of
+transactions score near the floor, so overall calibration is dominated by scores no
+human will ever read. In the region that is actually shown to an investigator:
+
+| Score band | Alerts | Mean predicted | Observed fraud rate | Gap |
+|---|---|---|---|---|
+| 0.60 – 0.80 | 180 | 0.7200 | 0.5500 | **+0.1700** |
+| 0.80 – 1.00 | 1,516 | 0.9571 | 0.8958 | +0.0613 |
+| **All alerts** | **1,696** | **0.9319** | **0.8591** | **+0.0728** |
+
+The meta-score is systematically overconfident where it matters. A displayed "93%
+risk" is fraud 86% of the time. This is the same lesson as PR AUC versus ROC AUC:
+an aggregate metric computed over a heavily imbalanced population hides the
+behaviour of the minority region that the system exists to find.
 
 ### Drift monitoring
 
@@ -157,6 +183,21 @@ univariately (ROC AUC 0.79, better than either risk encoding) yet adding it and 
 siblings cut Model 4's PR AUC from 0.797 to 0.180 and lost 419 caught frauds,
 because it is a card-level constant derived from training labels. Full measurements
 and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
+
+## Testing and CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push and PR:
+
+| Job | What it does |
+|---|---|
+| Unit tests | 46 pytest cases over PII masking, grounding checks, drift statistics and path/feature-contract resolution. |
+| dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`) and runs the **real** dbt models and data tests against it — no 500 MB download needed. |
+| Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
+| Docker | Builds the image and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. This is a regression guard for the broken image described below. |
+
+Several unit tests are explicit regressions for bugs this project shipped: PSI
+returning infinity on binary features, the grounding checker rejecting a masked PAN
+suffix or an ISO date, and graph features leaking back into the model feature lists.
 
 ## Data quality controls
 
@@ -191,10 +232,13 @@ Read this before drawing conclusions from the metrics above.
   entailment checking is done: a narrative can use only real figures and still draw
   an unsupported inference. Every narrative needs human review, and no human-review
   workflow exists beyond a quarantine directory.
-- **Target encodings are fit in-sample.** Category/state/merchant risk are computed
-  over the full training split and applied back to training rows. With 693 merchants
-  at 727+ rows each the practical leakage is small, but out-of-fold encoding is the
-  correct treatment.
+- **Per-card statistics are full-window training aggregates.** `card_txn_cnt`,
+  `card_mean_amt` and `card_std_amt` let a training row see its own card's later
+  spend. They are not label-derived so they cannot leak the target, but a strictly
+  causal version would use a trailing window per row. Target encodings are now
+  out-of-fold ([docs/target-encoding.md](docs/target-encoding.md)).
+- **The meta-score is overconfident in the alerting region** by ~7 points. It is
+  usable as a ranking; it should not be read as a probability until calibrated.
 - **No drift monitoring, no champion/challenger, no analyst feedback loop.** These
   are prerequisites for anything operational.
 - **Deployment is not continuous.** `deploy.sh` is a manual, Windows-oriented script
@@ -241,9 +285,10 @@ app.py             Streamlit investigator dashboard
 ## Roadmap
 
 1. Claim-level entailment checking for narratives, beyond numeric grounding.
-2. Out-of-fold target encoding; calibration curve for the meta-learner.
-3. Champion/challenger evaluation and an analyst-disposition feedback loop.
-4. Re-test the graph layer on data with realistic entity sparsity.
-5. CI running `dbt test`, `drift.py --fail-on-significant` and `terraform validate`
-   on every push.
+2. Fit an isotonic calibrator on a dedicated split to close the +7pt overconfidence
+   in the alerting region. Needs a fourth split so calibration and threshold
+   selection do not reuse the same rows.
+3. Trailing-window per-card statistics, for strict causality.
+4. Champion/challenger evaluation and an analyst-disposition feedback loop.
+5. Re-test the graph layer on data with realistic entity sparsity.
 6. Human-review workflow for quarantined narratives (queue, assignment, disposition).

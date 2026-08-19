@@ -25,6 +25,24 @@ variable "project_name" {
   default = "aegis-agent"
 }
 
+variable "bedrock_inference_profile" {
+  type        = string
+  description = "Cross-region inference profile the STR agent invokes."
+  default     = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+}
+
+variable "bedrock_foundation_model" {
+  type        = string
+  description = "Underlying foundation model behind the inference profile."
+  default     = "anthropic.claude-haiku-4-5-20251001-v1:0"
+}
+
+variable "bedrock_profile_regions" {
+  type        = list(string)
+  description = "Regions the cross-region profile can route to. Permission is required on the foundation model in each."
+  default     = ["us-east-1", "us-east-2", "us-west-2"]
+}
+
 # =====================================================================
 # AMAZON S3 COMPLIANCE DATA LAKE
 # =====================================================================
@@ -136,17 +154,26 @@ resource "aws_iam_policy" "pipeline_permissions" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      # The application invokes a CROSS-REGION inference profile ("us." prefix).
+      # That requires permission on the profile ARN *and* on the underlying
+      # foundation model in every region the profile can route to. Granting only
+      # the foundation-model ARN in one region -- as this policy previously did --
+      # produces AccessDeniedException at invoke time.
       {
-        Effect   = "Allow"
-        Action   = [
+        Effect = "Allow"
+        Action = [
           "bedrock:InvokeModel",
           "bedrock:InvokeModelWithResponseStream"
         ]
-        Resource = "arn:aws:bedrock:${var.aws_region}::foundation-model/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        Resource = concat(
+          ["arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${var.bedrock_inference_profile}"],
+          [for r in var.bedrock_profile_regions :
+          "arn:aws:bedrock:${r}::foundation-model/${var.bedrock_foundation_model}"]
+        )
       },
       {
-        Effect   = "Allow"
-        Action   = [
+        Effect = "Allow"
+        Action = [
           "s3:PutObject",
           "s3:GetObject",
           "s3:ListBucket"
@@ -221,7 +248,7 @@ resource "aws_ecs_task_definition" "pipeline_task" {
     name      = "aegis_app"
     image     = "${aws_ecr_repository.aegis_app.repository_url}:latest"
     essential = true
-    
+
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -233,7 +260,13 @@ resource "aws_ecs_task_definition" "pipeline_task" {
 
     environment = [
       { name = "DBT_DB_PATH", value = "/app/aegis_db.duckdb" },
-      { name = "MODELS_ARTIFACTS_DIR", value = "/app/models/" },
+      # /app/models is the dbt project; the joblib artifacts live in
+      # /app/models_artifacts. Pointing this at /app/models made the task unable to
+      # load any model.
+      { name = "MODELS_ARTIFACTS_DIR", value = "/app/models_artifacts" },
+      { name = "COMPLIANCE_LOGS_DIR", value = "/app/compliance_logs" },
+      { name = "AEGIS_RAW_DATA_DIR", value = "/app" },
+      { name = "DBT_PROFILES_DIR", value = "/app" },
       { name = "COMPLIANCE_S3_BUCKET", value = aws_s3_bucket.compliance_lake.id },
       { name = "AWS_DEFAULT_REGION", value = var.aws_region }
     ]
