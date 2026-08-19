@@ -62,7 +62,10 @@ jobs:
         env:
           AEGIS_RAW_DATA_DIR: ci_data
           DBT_DB_PATH: ci_data/ci.duckdb
-        run: dbt test --profiles-dir . --vars '{expected_row_count: 8500}'
+        # Block scalar: the "key: value" inside --vars would otherwise be parsed as
+        # a YAML mapping rather than passed through as a string.
+        run: |
+          dbt test --profiles-dir . --vars '{expected_row_count: 8500}'
 
   terraform:
     name: Terraform validate

@@ -190,14 +190,16 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 
 | Job | What it does |
 |---|---|
-| Unit tests | 46 pytest cases over PII masking, grounding checks, drift statistics and path/feature-contract resolution. |
+| Unit tests | 49 pytest cases over PII masking, grounding checks, drift statistics and path/feature-contract resolution. |
 | dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`) and runs the **real** dbt models and data tests against it — no 500 MB download needed. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
 | Docker | Builds the image and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. This is a regression guard for the broken image described below. |
 
 Several unit tests are explicit regressions for bugs this project shipped: PSI
 returning infinity on binary features, the grounding checker rejecting a masked PAN
-suffix or an ISO date, and graph features leaking back into the model feature lists.
+suffix or an ISO date, graph features leaking back into the model feature lists, and
+the workflow file itself being invalid YAML — which fails a run in zero seconds
+without executing a single job.
 
 ## Data quality controls
 
