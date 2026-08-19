@@ -35,7 +35,9 @@ ollama_cache/
 # DBT logs and compiled SQL target models
 target/
 logs/
-profiles.yml
+# profiles.yml is intentionally NOT ignored: it contains no credentials, only a
+# DuckDB path sourced from DBT_DB_PATH. Ignoring it made a fresh clone unable to
+# run dbt ("Could not find profile named 'aegis_agent'").
 
 # --- Terraform State & Secrets ---
 .terraform/

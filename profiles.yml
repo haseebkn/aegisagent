@@ -1,0 +1,7 @@
+aegis_agent:
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DBT_DB_PATH', 'aegis_db.duckdb') }}"
+      threads: 4
+  target: dev

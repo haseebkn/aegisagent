@@ -11,6 +11,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code, dbt project, and model artifacts.
+#
+# models_artifacts/ is a BUILD INPUT, not source. It is ~230 MB of joblib and stays
+# out of git, so it must exist locally before `docker build`:
+#     dbt run --profiles-dir . && python scripts/train_models.py
+# CI does exactly this against a fixture dataset before building.
 COPY dbt_project.yml profiles.yml app.py ./
 COPY models/ ./models/
 COPY scripts/ ./scripts/

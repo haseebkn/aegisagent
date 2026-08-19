@@ -109,13 +109,19 @@ the repo root — see `scripts/config.py`.
 
 ### Container
 
+The image carries the dbt project, scripts and model artifacts, so `models_artifacts/`
+must exist before you build. It is ~230 MB of joblib and is deliberately not in git:
+
 ```bash
+dbt run --profiles-dir .
+python scripts/train_models.py
 docker build -t aegis-app:latest .
 docker run --rm -v "$PWD/aegis_db.duckdb:/app/aegis_db.duckdb" aegis-app:latest
 ```
 
-The image carries the dbt project, scripts and model artifacts. The DuckDB file and
-raw CSVs are data and are mounted at runtime.
+The DuckDB file and raw CSVs are data and are mounted at runtime. CI runs this whole
+sequence against the fixture dataset on every push, which is how it verifies the
+image is genuinely self-contained rather than relying on a bind mount.
 
 ---
 
