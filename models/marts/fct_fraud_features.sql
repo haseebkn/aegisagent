@@ -36,5 +36,11 @@ SELECT
     -- Interactions
     amt_x_catRisk,
     dist_x_online,
-    amt_x_night
-FROM {{ ref('int_all_features') }}
+    amt_x_night,
+    -- Graph / entity features (see int_graph_features.sql)
+    merchant_card_degree,
+    card_merchant_degree,
+    merchant_fraud_card_cnt,
+    merchant_fraud_card_ratio,
+    card_2hop_fraud_cards
+FROM {{ ref('int_graph_features') }}

@@ -9,15 +9,16 @@ import boto3
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import COMPLIANCE_LOGS_DIR, FEAT_M2, FEAT_M3, FEAT_M4  # noqa: F401
+from scripts.grounding import check_narrative, correction_prompt
 from scripts.pii import mask_name, mask_pan
 
 BEDROCK_MODEL_ID = os.environ.get(
     "BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 BEDROCK_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 
-# Hedging terms are rejected only when the narrative is otherwise sound. Note the
-# deliberate absence of a bare "may": it collides with the month name and used to
-# discard perfectly valid reports that happened to mention a date in May.
+# Retained for reporting only -- vague hedging is a style observation, not grounds to
+# reject a filing. Note the deliberate absence of a bare "may", which collides with the
+# month name and used to discard valid reports mentioning a date in May.
 SPECULATIVE_TERMS = ["might", "possibly", "could", "appears", "may be", "may have", "may indicate"]
 
 def generate_sar_narrative(txn, p_m2, p_m3, p_m4, meta_score, client=None):
@@ -35,11 +36,27 @@ def generate_sar_narrative(txn, p_m2, p_m3, p_m4, meta_score, client=None):
     
     # 2. System and User Prompt
     system_instruction = (
-        "You are an expert FINTRAC compliance officer writing a definitive, legally compliant Suspicious Transaction Report (STR) under the Proceeds of Crime (Money Laundering) and Terrorist Financing Act (PCMLTFA) and FINTRAC guidelines.\n"
+        "You are an expert FINTRAC compliance officer drafting a Suspicious Transaction "
+        "Report (STR) under the Proceeds of Crime (Money Laundering) and Terrorist "
+        "Financing Act (PCMLTFA) and FINTRAC guidelines.\n"
         "Your narrative must follow the 5W+H framework (Who, What, When, Where, Why, How).\n"
-        "The WHY section must frame the analysis explicitly around the Canadian legal threshold: 'Reasonable Grounds to Suspect' (RGS), citing the Proceeds of Crime (Money Laundering) and Terrorist Financing Act (PCMLTFA) and FINTRAC guidelines. Focus purely on objective, factual anomalies (velocity spikes, geographic impossibility) with zero speculative language.\n"
-        "Crucial Constraint: Use objective, direct, and definitive language. Do NOT use speculative or hedging words (such as 'may', 'might', 'possibly', 'could', 'appears'). State the findings as direct facts.\n"
-        "You must output exactly the sections: WHO, WHAT, WHEN, WHERE, WHY, HOW. Do not add any conversational preamble or postscript."
+        "The WHY section must frame the analysis around the Canadian legal threshold "
+        "'Reasonable Grounds to Suspect' (RGS), citing the PCMLTFA and FINTRAC guidelines.\n"
+        "GROUNDING RULES -- these govern everything else:\n"
+        "1. Every figure you state must appear in the transaction payload below, or be "
+        "arithmetic derived from figures in it. Never invent a number.\n"
+        "2. Never assert anything about data you were not given. You have no prior "
+        "transaction, no previous location, no travel time, no device or IP telemetry, "
+        "no linked accounts, no KYC record and no case history. Do not reference them.\n"
+        "3. Do not compare measurements taken over different time windows as though they "
+        "were the same quantity (a 7-day count is not a rate relative to a 24-hour count).\n"
+        "4. Separate observation from inference. State the observed facts, then state what "
+        "they ground a suspicion of. An STR records reasonable grounds to SUSPECT; it does "
+        "not assert proven conclusions, and overstating certainty is a defect, not a "
+        "virtue. Write plainly and avoid vague hedging, but never claim more than the data "
+        "supports.\n"
+        "Output exactly the sections WHO, WHAT, WHEN, WHERE, WHY, HOW, with no preamble "
+        "or postscript."
     )
     
     prompt = f"""Transaction Data:
@@ -67,7 +84,7 @@ Stacked Ensemble Results:
 - Stacked Meta-Model Score: {meta_score:.4f}
 - Flagging Models: {voting_str}
 
-Generate the FINTRAC-compliant STR 5W+H narrative now, ensuring the WHY section explicitly cites the PCMLTFA and FINTRAC guidelines alongside the Reasonable Grounds to Suspect (RGS) threshold with objective factual anomalies only."""
+Generate the FINTRAC STR 5W+H narrative now. Use only the figures above. The WHY section must cite the PCMLTFA and FINTRAC guidelines and explain which of these observations ground a reasonable suspicion, and of what."""
     
     messages = [
         {
@@ -101,17 +118,16 @@ Generate the FINTRAC-compliant STR 5W+H narrative now, ensuring the WHY section 
             response_body = json.loads(response.get('body').read())
             narrative = response_body['content'][0]['text']
             
-            # Programmatic check using word boundaries
-            flagged = []
-            for word in SPECULATIVE_TERMS:
-                if re.search(rf"\b{word}\b", narrative, re.IGNORECASE):
-                    flagged.append(word)
-            
-            if not flagged:
-                print(f"SUCCESS: Narrative passed speculative language check on attempt {attempt + 1}.")
+            # Factual grounding review, not a vocabulary filter. See scripts/grounding.py
+            # and docs/str-narrative-design.md.
+            report = check_narrative(narrative, txn, p_m2, p_m3, p_m4, meta_score)
+
+            if report.ok:
+                print(f"SUCCESS: narrative passed grounding review on attempt "
+                      f"{attempt + 1}. {report.summary()}")
                 return narrative
-            
-            print(f"WARNING: Attempt {attempt + 1} generated speculative language: {flagged}")
+
+            print(f"WARNING: attempt {attempt + 1} failed grounding review. {report.summary()}")
             if attempt < max_retries:
                 messages.append({
                     "role": "assistant",
@@ -127,12 +143,12 @@ Generate the FINTRAC-compliant STR 5W+H narrative now, ensuring the WHY section 
                     "content": [
                         {
                             "type": "text",
-                            "text": f"Error: The previous response contained forbidden speculative language: {flagged}.\nRewrite the narrative focusing ONLY on definitive, objective facts. Do NOT use speculative or hedging words (such as 'may', 'might', 'possibly', 'could', 'appears'). State all findings as established facts."
+                            "text": correction_prompt(report)
                         }
                     ]
                 })
             else:
-                print("Max retries reached. Returning the last generated narrative.")
+                print("Max retries reached; returning last narrative for quarantine.")
                 return narrative
         except Exception as e:
             print(f"ERROR calling AWS Bedrock API on attempt {attempt + 1}: {e}")
@@ -144,28 +160,28 @@ def save_sar_report(txn, p_m2, p_m3, p_m4, meta_score, narrative, output_dir=Non
         output_dir = COMPLIANCE_LOGS_DIR
     os.makedirs(output_dir, exist_ok=True)
 
-    # 1. Speculative language verification.
+    # 1. Factual grounding review.
     #
-    # A narrative that fails the check is quarantined rather than discarded. Silently
-    # dropping it meant an alert that reached the reporting stage left no trace at
-    # all, which is a worse compliance posture than a hedged report sitting in a
-    # review queue.
-    flagged = [w for w in SPECULATIVE_TERMS
-               if re.search(rf"\b{w}\b", narrative, re.IGNORECASE)]
-    if flagged:
+    # A narrative that fails is quarantined rather than discarded. Silently dropping
+    # it meant an alert that reached the reporting stage left no trace at all, which
+    # is a worse compliance posture than an imperfect draft in a review queue.
+    report = check_narrative(narrative, txn, p_m2, p_m3, p_m4, meta_score)
+    if not report.ok:
         quarantine_dir = os.path.join(output_dir, "quarantine")
         os.makedirs(quarantine_dir, exist_ok=True)
         q_name = (f"QUARANTINE_{txn.get('trans_num', 'unknown')}_"
                   f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
         q_path = os.path.join(quarantine_dir, q_name)
         with open(q_path, "w", encoding="utf-8") as f:
-            f.write(f"REJECTED: speculative language {flagged}\n"
-                    f"Transaction: {txn.get('trans_num', 'unknown')}\n"
-                    f"Meta-score: {meta_score:.4f}\n"
-                    f"{'=' * 70}\n{narrative}\n")
+            f.write(
+                "REJECTED BY GROUNDING REVIEW\n"
+                f"{report.summary()}\n"
+                f"Transaction: {txn.get('trans_num', 'unknown')}\n"
+                f"Meta-score: {meta_score:.4f}\n"
+                f"{'=' * 70}\n{narrative}\n")
         print(f"QUARANTINED: narrative held for review at {q_path}")
         raise ValueError(
-            f"Compliance validation failed: speculative language {flagged}. "
+            f"Grounding review failed: {report.summary()} "
             f"Narrative quarantined at {q_path} for manual review.")
 
 
@@ -186,6 +202,8 @@ Transaction Amount:     ${txn.get('amt', 0.0):.2f}
 Merchant Name:          {txn.get('merchant', 'N/A')}
 Merchant Category:      {txn.get('category', 'N/A')}
 Distance from Home:     {txn.get('distance_km', 0.0):.2f} km
+
+GROUNDING REVIEW:       {report.summary()}
 
 ENSEMBLE INFERENCE SIGNALS:
 Model 2 (Geographic):   {p_m2:.4f}

@@ -31,6 +31,9 @@ FEAT_M4 = ['amt', 'log_amt', 'distance_km', 'night', 'hour_sin', 'hour_cos', 'da
            'is_online', 'category_risk', 'state_risk', 'merchant_risk',
            'card_txn_cnt', 'card_mean_amt', 'card_std_amt', 'txns_24h', 'txns_7d',
            'amt_x_catRisk', 'dist_x_online']
+# Graph/entity features are built by the dbt layer and available in the mart, but are
+# deliberately NOT fed to the models: they measurably degrade held-out performance on
+# this dataset. See docs/graph-features.md for the measured before/after.
 
 
 def resolve_model_dir(artifacts_dir=None) -> Path:

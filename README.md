@@ -63,9 +63,13 @@ meta-learner; the calibration split, which neither the base models nor the
 meta-learner have seen, selects the decision threshold.
 
 **Reporting layer.** Alerts are sent to AWS Bedrock (Claude Haiku 4.5) with a 5W+H
-STR prompt. A retry loop rejects hedging language; narratives that still fail after
-retries are written to `compliance_logs/quarantine/` for manual review rather than
-discarded. Card numbers and names are masked before they leave the process.
+STR prompt. A retry loop enforces **factual grounding** — every quantity in the
+narrative must trace to the payload, and claims about data the pipeline never
+supplied (prior transactions, travel times, device telemetry, linked accounts) are
+rejected. Narratives that still fail are quarantined for review rather than
+discarded. Card numbers and names are masked before they leave the process. The
+reasoning behind this control, and why the previous hedging-word blacklist was wrong
+in both directions, is in [docs/str-narrative-design.md](docs/str-narrative-design.md).
 
 ---
 
@@ -108,6 +112,52 @@ raw CSVs are data and are mounted at runtime.
 
 ---
 
+## Analysis tooling
+
+| Command | Purpose |
+|---|---|
+| `python scripts/evaluate.py --alert-budget 10` | PR AUC by model, operating points across the threshold range, cost-minimising threshold, and the threshold implied by an alert budget. |
+| `python scripts/drift.py --fail-on-significant` | PSI + KS between the training and scoring windows. Exits non-zero on significant drift, so it can gate a scoring run. |
+| `python scripts/graph_signal.py` | Bipartite graph density and univariate power of the entity features. |
+
+### Threshold selection is a business decision
+
+`evaluate.py` costs a false negative at the fraud amount and a false positive at a
+configurable investigation cost (default $25). On the held-out split the
+F1-optimal threshold is **not** cost-optimal:
+
+| | Threshold | Alerts/day | Precision | Recall | Total cost |
+|---|---|---|---|---|---|
+| Deployed (F1-optimal) | 0.5832 | 9.1 | 84.8% | 69.8% | $241,907 |
+| Cost-minimising | 0.0138 | 19.8 | 46.8% | 83.3% | **$151,300** |
+
+Roughly $90k less loss over 193 days, bought with ~11 more alerts per day. Which
+one is right depends on staffing, not on the model — which is the point.
+
+### Drift monitoring
+
+`drift.py` is the control that would have caught this project's worst bug. Against
+the current pipeline all 19 monitored features are stable. Replaying the original
+velocity definition through it:
+
+```
+txns_24h     PSI=7.608  KS=0.995  mean 4.884 -> 0.014  [SIGNIFICANT]
+txns_7d      PSI=5.681  KS=0.966  mean 26.099 -> 0.502 [SIGNIFICANT]
+```
+
+Thirty times the significance threshold, on a bug that every null and range check
+passed.
+
+### Entity/graph features
+
+A card ↔ merchant bipartite layer is built in
+`models/intermediate/int_graph_features.sql` and materialised into the mart, but is
+**deliberately not fed to any model**. `card_2hop_fraud_cards` looks strong
+univariately (ROC AUC 0.79, better than either risk encoding) yet adding it and its
+siblings cut Model 4's PR AUC from 0.797 to 0.180 and lost 419 caught frauds,
+because it is a card-level constant derived from training labels. Full measurements
+and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
+
 ## Data quality controls
 
 `dbt test` runs eight checks. Three are worth calling out because they encode bugs
@@ -136,11 +186,11 @@ Read this before drawing conclusions from the metrics above.
   predicate offence, so proceeds-of-fraud STRs are legitimate, but this project uses
   an STR format on a card-fraud dataset for demonstration purposes. Narratives are
   drafting aids, not filings.
-- **LLM narratives are not verified for factual grounding.** The retry loop screens
-  hedging language only. It does not check that claims in the narrative follow from
-  the input payload, and generated text has been observed to assert facts it was
-  never given. Every narrative needs human review. Closing this gap is the top item
-  on the roadmap.
+- **Grounding checks are necessary, not sufficient.** Quantities are verified against
+  the payload and a list of unsupported claim types is screened, but no claim-level
+  entailment checking is done: a narrative can use only real figures and still draw
+  an unsupported inference. Every narrative needs human review, and no human-review
+  workflow exists beyond a quarantine directory.
 - **Target encodings are fit in-sample.** Category/state/merchant risk are computed
   over the full training split and applied back to training rows. With 693 merchants
   at 727+ rows each the practical leakage is small, but out-of-fold encoding is the
@@ -190,11 +240,10 @@ app.py             Streamlit investigator dashboard
 
 ## Roadmap
 
-1. Replace the hedging-word guardrail with factual grounding checks — assert every
-   figure in a narrative traces to the input payload.
+1. Claim-level entailment checking for narratives, beyond numeric grounding.
 2. Out-of-fold target encoding; calibration curve for the meta-learner.
-3. Cost-sensitive threshold selection driven by an explicit alert budget.
-4. Entity/graph features (shared-merchant components, connections to known-fraud
-   entities) — the signal supervised per-transaction models cannot see.
-5. PSI/KS drift monitoring on the serving feature distribution.
-6. CI running `dbt test` + `terraform validate` on every push.
+3. Champion/challenger evaluation and an analyst-disposition feedback loop.
+4. Re-test the graph layer on data with realistic entity sparsity.
+5. CI running `dbt test`, `drift.py --fail-on-significant` and `terraform validate`
+   on every push.
+6. Human-review workflow for quarantined narratives (queue, assignment, disposition).
