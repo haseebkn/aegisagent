@@ -1,10 +1,31 @@
-ollama_cache/
-aegis_db.duckdb
-*.csv
-logs/
-target/
-.git/
+# Keep the build context small WITHOUT excluding anything the image needs to run.
+# The previous version excluded models/, models_artifacts/ and the DuckDB file,
+# which left the container with no dbt project, no model artifacts and no data.
+# docker-compose bind-mounted the repo over /app, so this was invisible locally.
+
+# Local virtualenvs and caches
 .venv/
-models_artifacts/
-models/
+venv/
+__pycache__/
+*.pyc
+.git/
+.pytest_cache/
+
+# Large local-only assets. The raw CSVs are rebuilt into the DuckDB file by dbt;
+# mount them at runtime (AEGIS_RAW_DATA_DIR) if the container needs to re-run dbt.
+fraudTrain.csv
+fraudTest.csv
+ollama_cache/
+*.pdf
+*.ipynb
+
+# Build/run outputs regenerated inside the container
+target/
+logs/
 compliance_logs/
+
+# Terraform state must never enter an image
+terraform/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars

@@ -1,30 +1,30 @@
+{#
+    Target encodings are computed out-of-fold and smoothed; see
+    macros/oof_target_encoding.sql for why.
+#}
+{% set encodings = [
+    ('category_risk', 'category'),
+    ('state_risk',    'state'),
+    ('merchant_risk', 'merchant')
+] %}
+
 WITH train_only AS (
     SELECT * FROM {{ ref('stg_transactions_train') }}
 ),
 
-category_rates AS (
-    SELECT 
-        category, 
-        AVG(is_fraud) AS category_risk
-    FROM train_only
-    GROUP BY category
+global_stats AS (
+    SELECT AVG(is_fraud) AS global_rate FROM train_only
 ),
 
-state_rates AS (
-    SELECT 
-        state, 
-        AVG(is_fraud) AS state_risk
-    FROM train_only
-    GROUP BY state
+-- Deterministic fold assignment, stable across runs because it hashes the
+-- transaction id rather than relying on row order.
+train_folded AS (
+    SELECT *, ABS(HASH(trans_num)) % 5 AS enc_fold FROM train_only
 ),
 
-merchant_rates AS (
-    SELECT 
-        merchant, 
-        AVG(is_fraud) AS merchant_risk
-    FROM train_only
-    GROUP BY merchant
-),
+{% for name, key_col in encodings %}
+{{ oof_encoding_cte(name, key_col) }},
+{% endfor %}
 
 card_rates AS (
     SELECT
@@ -45,17 +45,18 @@ unioned AS (
 joined AS (
     SELECT
         u.*,
-        COALESCE(c.category_risk, 0.0) AS category_risk,
-        COALESCE(s.state_risk, 0.0) AS state_risk,
-        COALESCE(m.merchant_risk, 0.0) AS merchant_risk,
+        COALESCE(cat.category_risk, g.global_rate) AS category_risk,
+        COALESCE(st.state_risk,     g.global_rate) AS state_risk,
+        COALESCE(mer.merchant_risk, g.global_rate) AS merchant_risk,
         COALESCE(cr.card_txn_cnt, 0) AS card_txn_cnt,
         COALESCE(cr.card_mean_amt, 0.0) AS card_mean_amt,
         COALESCE(cr.card_std_amt, 0.0) AS card_std_amt
     FROM unioned u
-    LEFT JOIN category_rates c ON u.category = c.category
-    LEFT JOIN state_rates s ON u.state = s.state
-    LEFT JOIN merchant_rates m ON u.merchant = m.merchant
-    LEFT JOIN card_rates cr ON u.cc_num = cr.cc_num
+    CROSS JOIN global_stats g
+    LEFT JOIN category_risk_map cat ON u.trans_num = cat.trans_num
+    LEFT JOIN state_risk_map    st  ON u.trans_num = st.trans_num
+    LEFT JOIN merchant_risk_map mer ON u.trans_num = mer.trans_num
+    LEFT JOIN card_rates        cr  ON u.cc_num    = cr.cc_num
 )
 
 SELECT
@@ -106,7 +107,17 @@ SELECT
     card_txn_cnt,
     card_mean_amt,
     card_std_amt,
-    -- Relative amt features
-    (amt - card_mean_amt) / (card_std_amt + 1e-6) AS amt_z_card,
-    amt / (card_mean_amt + 1e-6) AS amt_over_mean_card
+    -- Relative amt features.
+    -- Cards with no prior history have card_mean_amt = card_std_amt = 0. Dividing by
+    -- an epsilon there produced z-scores in the billions, which were rendered into
+    -- the STR prompt as established fact. Emit the neutral value instead, and floor
+    -- the denominators at $1 so a genuinely low-variance card cannot blow up either.
+    CASE
+        WHEN card_txn_cnt = 0 THEN 0.0
+        ELSE (amt - card_mean_amt) / GREATEST(card_std_amt, 1.0)
+    END AS amt_z_card,
+    CASE
+        WHEN card_txn_cnt = 0 THEN 1.0
+        ELSE amt / GREATEST(card_mean_amt, 1.0)
+    END AS amt_over_mean_card
 FROM joined

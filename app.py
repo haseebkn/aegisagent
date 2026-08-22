@@ -13,7 +13,9 @@ ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from scripts.config import ARTIFACTS_DIR, DB_PATH
 from scripts.inference_engine import load_models, run_inference, TransactionFeatures
+from scripts.pii import mask_pan
 from scripts.sar_agent import generate_sar_narrative, save_sar_report
 
 # Page config
@@ -198,12 +200,7 @@ st.markdown("""
 
 # Helper: Load model version telemetry
 def load_telemetry():
-    artifacts_dir = os.environ.get("MODELS_ARTIFACTS_DIR", "e:/AegisAgent/models_artifacts")
-    if not os.path.exists(artifacts_dir) and os.path.exists("/app/models/"):
-        artifacts_dir = "/app/models/"
-    elif not os.path.exists(artifacts_dir):
-        artifacts_dir = os.path.join(ROOT_DIR, "models_artifacts")
-        
+    artifacts_dir = str(ARTIFACTS_DIR)
     latest_file = os.path.join(artifacts_dir, "latest_version.txt")
     if os.path.exists(latest_file):
         with open(latest_file, "r") as f:
@@ -217,18 +214,12 @@ def load_telemetry():
 # Cache resource for models
 @st.cache_resource
 def load_production_models():
-    artifacts_dir = os.environ.get("MODELS_ARTIFACTS_DIR", "e:/AegisAgent/models_artifacts")
-    if not os.path.exists(artifacts_dir) and os.path.exists("/app/models/"):
-        artifacts_dir = "/app/models/"
-    elif not os.path.exists(artifacts_dir):
-        artifacts_dir = os.path.join(ROOT_DIR, "models_artifacts")
-    
-    return load_models(artifacts_dir)
+    return load_models(ARTIFACTS_DIR)
 
 # Load database transactions
 @st.cache_data
 def get_db_transactions():
-    db_path = os.environ.get("DBT_DB_PATH", "e:/AegisAgent/aegis_db.duckdb")
+    db_path = str(DB_PATH)
     if not os.path.exists(db_path):
         return []
     
@@ -261,7 +252,10 @@ def get_db_transactions():
     con.close()
     return df.to_dict(orient='records')
 
-# Define synthetic transaction for the fraud demo (TXN_88888)
+# A synthetic high-risk transaction used to exercise the STR path on demand.
+# Only the *input* is synthetic -- it carries a complete feature vector and is
+# scored by the real ensemble like every other row in the dropdown. Nothing in
+# this dashboard displays a model score that did not come out of a model.
 FRAUD_DEMO_TXN = {
     'trans_num': 'TXN_88888',
     'trans_date_trans_time': pd.Timestamp('2026-06-10 02:45:00'),
@@ -332,6 +326,7 @@ selected_idx = st.sidebar.selectbox(
 )
 
 selected_txn = all_options[selected_idx]
+st.sidebar.caption(f"Card: {mask_pan(selected_txn.get('cc_num'))}")
 
 # Sidebar: System Metadata
 st.sidebar.markdown("<div class='custom-hr'></div>", unsafe_allow_html=True)
@@ -343,10 +338,25 @@ st.sidebar.write(f"**Active Version:** `{model_version}`")
 
 if telemetry:
     st.sidebar.write(f"**Trained At:** `{pd.Timestamp(telemetry.get('trained_at')).strftime('%Y-%m-%d %H:%M:%S')}`")
-    st.sidebar.write(f"**Val F1 Score:** `{telemetry.get('val_f1', 0.0):.4f}`")
-    st.sidebar.write(f"**Test Meta AUC:** `{telemetry.get('test_auc_meta', 0.0):.4f}`")
-    
-    with st.sidebar.expander("Base Model Performance (Test AUC)"):
+    st.sidebar.write(f"**Decision Threshold:** `{telemetry.get('optimal_threshold', 0.0):.4f}`")
+    st.sidebar.caption(f"Selected on: {telemetry.get('threshold_selected_on', 'n/a')}")
+
+    st.sidebar.markdown("**Held-out test performance**")
+    st.sidebar.write(f"- PR AUC: `{telemetry.get('test_pr_auc_meta', 0.0):.4f}`")
+    st.sidebar.write(f"- ROC AUC: `{telemetry.get('test_auc_meta', 0.0):.4f}`")
+    st.sidebar.write(f"- Precision: `{telemetry.get('test_precision', 0.0):.2%}`")
+    st.sidebar.write(f"- Recall: `{telemetry.get('test_recall', 0.0):.2%}`")
+    st.sidebar.caption(
+        "PR AUC is the headline metric here: at ~0.6% fraud prevalence, ROC AUC "
+        "flatters every model."
+    )
+
+    if telemetry.get('test_alerts'):
+        st.sidebar.markdown("**Operational load**")
+        st.sidebar.write(f"- Alerts: `{telemetry['test_alerts']:,}`")
+        st.sidebar.write(f"- Per day: `{telemetry.get('test_alerts_per_day', 0)}`")
+
+    with st.sidebar.expander("Base Model Performance (Test ROC AUC)"):
         st.sidebar.write(f"- Model 2 (Geo): `{telemetry.get('test_auc_m2', 0.0):.4f}`")
         st.sidebar.write(f"- Model 3 (Cat): `{telemetry.get('test_auc_m3', 0.0):.4f}`")
         st.sidebar.write(f"- Model 4 (Vel): `{telemetry.get('test_auc_m4', 0.0):.4f}`")
@@ -397,28 +407,21 @@ st.subheader("🧠 Stacking Ensemble Telemetry")
 # Load models and threshold
 model_2, model_3, model_4, scaler_4, meta_model, threshold = load_production_models()
 
-# Perform inference (or use benchmark overrides for the demo)
-if selected_txn['trans_num'] in ('TXN_88888', 'TXN_VERIFY_88888'):
-    p_m2_val = 0.9950
-    p_m3_val = 0.9890
-    p_m4_val = 0.9920
-    meta_score = 0.9998
-    triggered = True
-else:
-    df_row = pd.DataFrame([selected_txn])
-    # run inference with validation
-    try:
-        meta_p, p_m2, p_m3, p_m4, triggered_alert = run_inference(
-            df_row, model_2, model_3, model_4, scaler_4, meta_model, threshold
-        )
-        meta_score = float(meta_p[0])
-        p_m2_val = float(p_m2[0])
-        p_m3_val = float(p_m3[0])
-        p_m4_val = float(p_m4[0])
-        triggered = bool(triggered_alert[0])
-    except Exception as e:
-        st.error(f"Inference Engine Error: {e}")
-        st.stop()
+# Every transaction, including the synthetic demo row, is scored by the live
+# ensemble. There is deliberately no override branch here.
+df_row = pd.DataFrame([selected_txn])
+try:
+    meta_p, p_m2, p_m3, p_m4, triggered_alert = run_inference(
+        df_row, model_2, model_3, model_4, scaler_4, meta_model, threshold
+    )
+    meta_score = float(meta_p[0])
+    p_m2_val = float(p_m2[0])
+    p_m3_val = float(p_m3[0])
+    p_m4_val = float(p_m4[0])
+    triggered = bool(triggered_alert[0])
+except Exception as e:
+    st.error(f"Inference Engine Error: {e}")
+    st.stop()
 
 # Layout: Base model progress bars (left) + Risk Gauge (right)
 col_left, col_right = st.columns([3, 2], gap="large")

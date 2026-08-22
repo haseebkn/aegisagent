@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run unit tests
+        run: pytest tests/unit -v
+
+  dbt-pipeline:
+    name: dbt build + data tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The real Kaggle CSVs are 500 MB and not in the repo. The fixture reproduces
+      # the shape that matters -- chronological split boundary, repeated cards and
+      # merchants, realistic imbalance -- so the actual dbt models and data tests
+      # run here rather than merely being parsed.
+      - name: Generate fixture dataset
+        run: python tests/fixtures/make_fixture.py --out-dir ci_data
+
+      - name: dbt run
+        env:
+          AEGIS_RAW_DATA_DIR: ci_data
+          DBT_DB_PATH: ci_data/ci.duckdb
+        run: dbt run --profiles-dir .
+
+      - name: dbt test
+        env:
+          AEGIS_RAW_DATA_DIR: ci_data
+          DBT_DB_PATH: ci_data/ci.duckdb
+        # Block scalar: the "key: value" inside --vars would otherwise be parsed as
+        # a YAML mapping rather than passed through as a string.
+        run: |
+          dbt test --profiles-dir . --vars '{expected_row_count: 8500}'
+
+  terraform:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+
+      - name: Format check
+        run: terraform -chdir=terraform fmt -check -recursive
+
+      # -backend=false so validation needs no AWS credentials and never touches
+      # remote state.
+      - name: Init (no backend)
+        run: terraform -chdir=terraform init -backend=false
+
+      - name: Validate
+        run: terraform -chdir=terraform validate
+
+  docker:
+    name: Docker image builds and is self-contained
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Model artifacts are a build input, not source: they are ~230 MB of joblib
+      # and stay out of git. The image must still carry them, so CI produces a small
+      # set from the fixture before building. This also proves the documented
+      # "dbt run -> train -> build" sequence actually works from a clean checkout.
+      - name: Build feature mart and train artifacts from fixture
+        env:
+          AEGIS_RAW_DATA_DIR: ci_data
+          DBT_DB_PATH: ci_data/ci.duckdb
+          MODELS_ARTIFACTS_DIR: models_artifacts
+        run: |
+          python tests/fixtures/make_fixture.py --out-dir ci_data
+          dbt run --profiles-dir .
+          python scripts/train_models.py
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: aegis-app:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Regression guard: .dockerignore once excluded models/, models_artifacts/ and
+      # the DuckDB file, so the image shipped without its dbt project or artifacts.
+      # docker-compose bind-mounted the repo over /app and hid it. Run with no mounts.
+      - name: Image contains the dbt project and model artifacts
+        run: |
+          docker run --rm aegis-app:ci python -c "
+          import pathlib, sys
+          from scripts.config import resolve_model_dir
+          from scripts.inference_engine import load_models
+          sql = list(pathlib.Path('/app/models').rglob('*.sql'))
+          assert pathlib.Path('/app/dbt_project.yml').exists(), 'dbt project missing'
+          assert len(sql) >= 6, f'expected dbt models, found {len(sql)}'
+          threshold = load_models()[-1]
+          assert 0.0 < threshold < 1.0, threshold
+          print(f'OK: {len(sql)} dbt models, artifacts at {resolve_model_dir()}, threshold {threshold:.4f}')
+          "
