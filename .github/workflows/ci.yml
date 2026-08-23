@@ -10,6 +10,27 @@ env:
   PYTHON_VERSION: "3.11"
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff==0.14.5
+
+      # Correctness rules only (see pyproject.toml). This exists because dead code
+      # accumulated twice: a guardrail constant left unused by a refactor, and a
+      # function renamed at its definition but not at its call site -- which no test
+      # could catch, since nothing imports it.
+      - name: ruff check
+        run: ruff check .
+
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -66,6 +87,15 @@ jobs:
         # a YAML mapping rather than passed through as a string.
         run: |
           dbt test --profiles-dir . --vars '{expected_row_count: 8500}'
+
+      # The control that would have caught this project's worst bug: velocity
+      # features averaging 4.88 in training and 0.014 at scoring time, which every
+      # null and range check passed. Out-of-fold target encodings are reported but
+      # held out of the gate -- they differ in shape by construction, not fault.
+      - name: Feature drift gate
+        env:
+          DBT_DB_PATH: ci_data/ci.duckdb
+        run: python scripts/drift.py --fail-on-significant
 
   terraform:
     name: Terraform validate

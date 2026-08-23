@@ -17,7 +17,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.config import ARTIFACTS_DIR, DB_PATH, PROJECT_ROOT
-from scripts.inference_engine import load_models, run_inference
+from scripts.inference_engine import (NoAlertsInSample, load_models, run_inference,
+                                      select_highest_risk_alert)
 from scripts.sar_agent import generate_sar_narrative, save_sar_report
 
 EXPECTED_ROWS = 1852394
@@ -82,7 +83,7 @@ def verify_duckdb_schema():
         con.close()
 
 
-def _load_scored_test_sample(limit=500):
+def _load_scored_test_sample(limit=10000):
     """Score a real slice of the test split with the production artifacts."""
     con = duckdb.connect(str(DB_PATH))
     try:
@@ -122,13 +123,19 @@ def verify_inference_bounds():
 
 def verify_sar_agent():
     print("\n--- 4. VERIFYING AGENTIC STR GENERATION (FINTRAC) ---")
-    print("Selecting the highest-risk real transaction from the test split...")
-    df, meta_probs, p_m2, p_m3, p_m4, _ = _load_scored_test_sample(limit=500)
+    print("Selecting the highest-risk ALERT from the test split...")
+    df, meta_probs, p_m2, p_m3, p_m4, triggered = _load_scored_test_sample()
 
-    idx = int(np.argmax(meta_probs))
+    try:
+        idx = select_highest_risk_alert(meta_probs, triggered)
+    except NoAlertsInSample as e:
+        print(f"ERROR: {e}")
+        return False
+
     txn = df.iloc[idx].to_dict()
     meta_score = float(meta_probs[idx])
-    print(f"Selected {txn['trans_num']} with live meta-score {meta_score:.4f} "
+    print(f"{int(triggered.sum())} alert(s) in a sample of {len(df):,}. "
+          f"Selected {txn['trans_num']} with live meta-score {meta_score:.4f} "
           f"(base models: {p_m2[idx]:.4f} / {p_m3[idx]:.4f} / {p_m4[idx]:.4f}); "
           f"ground-truth is_fraud={int(txn.get('is_fraud', -1))}")
 

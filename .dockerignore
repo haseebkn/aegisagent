@@ -19,6 +19,12 @@ ollama_cache/
 *.pdf
 *.ipynb
 
+# Model binaries must only ever reach the image via models_artifacts/. A stale set
+# of these sat inside the dbt project directory (models/) from the pre-versioning
+# layout, unreferenced by any code, adding 266 MB to every build.
+models/*.joblib
+models/meta_threshold.txt
+
 # Build/run outputs regenerated inside the container
 target/
 logs/

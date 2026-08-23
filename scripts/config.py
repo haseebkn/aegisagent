@@ -37,12 +37,26 @@ FEAT_M4 = ['amt', 'log_amt', 'distance_km', 'night', 'hour_sin', 'hour_cos', 'da
 
 
 def resolve_model_dir(artifacts_dir=None) -> Path:
-    """Return the versioned artifact directory named by latest_version.txt."""
+    """Return the versioned artifact directory named by latest_version.txt.
+
+    A pointer naming a version that no longer exists is an error, not a reason to
+    fall back. The base directory previously held a stale pre-versioning artifact
+    set (threshold 0.4541 against a deployed 0.6152), so a broken pointer silently
+    loaded the wrong models and scored on with no warning. Failing loudly is the
+    only safe behaviour when the requested version is missing.
+
+    No pointer at all is still a valid flat layout, and returns the base directory.
+    """
     base = Path(artifacts_dir) if artifacts_dir else ARTIFACTS_DIR
     pointer = base / "latest_version.txt"
     if pointer.exists():
         version = pointer.read_text().strip()
         candidate = base / version
-        if candidate.exists():
-            return candidate
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"latest_version.txt names '{version}' but {candidate} does not exist. "
+                f"Refusing to fall back to {base}, which may hold stale artifacts. "
+                f"Retrain, or point latest_version.txt at a version that is present."
+            )
+        return candidate
     return base

@@ -2,11 +2,9 @@ import sys
 import os
 import streamlit as st
 import pandas as pd
-import numpy as np
 import duckdb
 import json
 import re
-import boto3
 
 # Add project root to sys.path
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,7 +12,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from scripts.config import ARTIFACTS_DIR, DB_PATH
-from scripts.inference_engine import load_models, run_inference, TransactionFeatures
+from scripts.inference_engine import load_models, run_inference
 from scripts.pii import mask_pan
 from scripts.sar_agent import generate_sar_narrative, save_sar_report
 
@@ -333,7 +331,7 @@ st.sidebar.markdown("<div class='custom-hr'></div>", unsafe_allow_html=True)
 st.sidebar.subheader("⚙️ System Metadata")
 
 telemetry, model_version = load_telemetry()
-st.sidebar.write(f"**Model Directory:** `models_artifacts/`")
+st.sidebar.write("**Model Directory:** `models_artifacts/`")
 st.sidebar.write(f"**Active Version:** `{model_version}`")
 
 if telemetry:
@@ -430,17 +428,17 @@ with col_left:
     st.write("##### Base Model Probability Outputs")
     
     # Model 2 Progress Bar
-    st.markdown(f"**Model 2 (Geographic Focus)** - Geographic anomaly index")
+    st.markdown("**Model 2 (Geographic Focus)** - Geographic anomaly index")
     st.progress(p_m2_val)
     st.markdown(f"<p style='text-align: right; margin-top:-15px; color:#8b949e; font-size:0.9rem;'>Score: <b>{p_m2_val:.4f}</b></p>", unsafe_allow_html=True)
     
     # Model 3 Progress Bar
-    st.markdown(f"**Model 3 (Category Focus)** - Category spend anomaly index")
+    st.markdown("**Model 3 (Category Focus)** - Category spend anomaly index")
     st.progress(p_m3_val)
     st.markdown(f"<p style='text-align: right; margin-top:-15px; color:#8b949e; font-size:0.9rem;'>Score: <b>{p_m3_val:.4f}</b></p>", unsafe_allow_html=True)
     
     # Model 4 Progress Bar
-    st.markdown(f"**Model 4 (Velocity Focus)** - Card transaction rate and velocity index")
+    st.markdown("**Model 4 (Velocity Focus)** - Card transaction rate and velocity index")
     st.progress(p_m4_val)
     st.markdown(f"<p style='text-align: right; margin-top:-15px; color:#8b949e; font-size:0.9rem;'>Score: <b>{p_m4_val:.4f}</b></p>", unsafe_allow_html=True)
 

@@ -5,7 +5,6 @@ import sys
 
 import duckdb
 import numpy as np
-import pandas as pd
 from pydantic import BaseModel, Field, ValidationError
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -94,6 +93,30 @@ def validate_frame(df):
             )
         except ValidationError as e:
             raise ValueError(f"Input feature validation failed at row {idx}: {e}") from e
+
+
+class NoAlertsInSample(RuntimeError):
+    """No transaction in the scored sample breached the decision threshold."""
+
+
+def select_highest_risk_alert(meta_probs, triggered):
+    """Index of the highest-scoring transaction that actually triggered an alert.
+
+    Taking a plain argmax over the sample is wrong: at 0.39% prevalence a few
+    hundred rows usually contain no alert at all, so the "riskiest" row is a
+    perfectly ordinary transaction. Drafting a Suspicious Transaction Report for it
+    -- as this pipeline did, on a transaction scoring 0.0040 against a 0.6152
+    threshold -- states suspicion the model does not hold, and then reports the run
+    as compliant. An STR is a consequence of an alert; no alert means no report.
+    """
+    alert_idx = np.flatnonzero(triggered)
+    if alert_idx.size == 0:
+        raise NoAlertsInSample(
+            f"No transaction in this sample of {len(meta_probs)} breached the "
+            f"decision threshold (max score {meta_probs.max():.4f}). An STR is only "
+            f"meaningful for an alert. Increase the sample size so it contains one."
+        )
+    return int(alert_idx[np.argmax(meta_probs[alert_idx])])
 
 
 def run_inference(df, model_2, model_3, model_4, scaler_4, meta_model, threshold=None):

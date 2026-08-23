@@ -1,13 +1,11 @@
 import os
-import subprocess
+import re
 import sys
 
 import duckdb
-import joblib
-import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.config import ARTIFACTS_DIR, COMPLIANCE_LOGS_DIR, DB_PATH, resolve_model_dir
+from scripts.config import COMPLIANCE_LOGS_DIR, DB_PATH, resolve_model_dir
 
 con = duckdb.connect(str(DB_PATH))
 
@@ -118,26 +116,52 @@ for log in logs:
     except UnicodeDecodeError:
         content = open(path, encoding="cp1252").read()
     sections = [s for s in ["WHO","WHAT","WHEN","WHERE","WHY","HOW"] if s in content]
-    speculative = [w for w in ["might","possibly","could be","appears to","suspects that"]
-                   if f" {w} " in f" {content.lower()} "]
+    # Unmasked PAN is a real compliance failure. Hedging is not: an STR records
+    # reasonable grounds to SUSPECT, so wording like "individually each indicator
+    # might admit a benign explanation; collectively they establish a reasonable
+    # basis to suspect" is exactly right, and this audit used to mark it FAIL.
+    # Grounding -- every figure tracing to the payload -- is enforced at generation
+    # time by scripts/grounding.py and stamped into the report. See
+    # docs/str-narrative-design.md for why the old word blacklist was abandoned.
+    unmasked_pan = re.findall(r"\b\d{12,19}\b", content)
+    hedging = [w for w in ["might", "possibly", "could be", "appears to"]
+               if f" {w} " in f" {content.lower()} "]
+    grounding_line = next((ln.strip() for ln in content.splitlines()
+                           if ln.startswith("GROUNDING REVIEW:")), None)
     print(f"  {log}")
     print(f"    5W+H sections: {len(sections)}/6 [{pf(len(sections)==6)}]")
-    print(f"    Speculative words: {speculative if speculative else 'None'} [{pf(not speculative)}]")
+    print(f"    Unmasked PAN: {'FOUND ' + str(unmasked_pan[:1]) if unmasked_pan else 'none'} "
+          f"[{pf(not unmasked_pan)}]")
+    if grounding_line:
+        verdict = grounding_line.split(":", 1)[1].strip()
+        print(f"    Grounding at generation: {verdict[:66]} [{pf(verdict.startswith('GROUNDED'))}]")
+    if hedging:
+        print(f"    Note (advisory, not a failure): hedging terms present {hedging}")
 
-# 12. AWS Bedrock client
+# 12. AWS Bedrock reachability.
+#
+# This previously printed "PASS [{pf(True)}]" for model access without making any
+# call at all. A check that cannot fail is not a check -- the same defect family as
+# the hardcoded ensemble scores removed from the dashboard. It now actually asks
+# Bedrock whether the configured model is available, and says so plainly when it
+# cannot reach the service rather than claiming success.
+print("\n=== AWS BEDROCK ACCESS ===")
+model_id = os.environ.get("BEDROCK_MODEL_ID",
+                          "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+# A cross-region inference profile ("us." prefix) is backed by this foundation model.
+foundation_id = model_id.split(".", 1)[1] if model_id.startswith("us.") else model_id
 try:
     import boto3
-    client = boto3.client('bedrock-runtime', region_name='us-east-1')
-    has_boto3 = True
-except Exception as e:
-    has_boto3 = False
-print(f"\n=== AWS BEDROCK CLIENT ===")
-print(f"  Boto3 client loaded: {'PASS' if has_boto3 else 'FAIL'} [{pf(has_boto3)}]")
-
-# 13. AWS Bedrock Access Check (List / Test invoke or model list placeholder)
-# Since we are checking for Claude 3 model access, we can assert success or connection status
-print(f"\n=== AWS BEDROCK MODELS ===")
-print(f"  us.anthropic.claude-haiku-4-5-20251001-v1:0 targeted: PASS [{pf(True)}]")
+    summaries = boto3.client("bedrock", region_name=region).list_foundation_models()
+    available = {m["modelId"] for m in summaries.get("modelSummaries", [])}
+    reachable = foundation_id in available
+    print(f"  Region: {region}  |  foundation models visible: {len(available)}")
+    print(f"  {foundation_id} available: {reachable} [{pf(reachable)}]")
+except Exception as exc:
+    print(f"  SKIPPED - could not query Bedrock "
+          f"({type(exc).__name__}: {str(exc)[:80]})")
+    print(f"  Target model (UNVERIFIED): {model_id}")
 
 print("\n" + "="*60)
 print("PHASE 1 AUDIT COMPLETE")

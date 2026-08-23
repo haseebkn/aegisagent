@@ -358,6 +358,11 @@ resource "aws_ecs_service" "aegis_compliance_service" {
 # =====================================================================
 # OUTPUTS
 # =====================================================================
+output "ecr_repository_url" {
+  description = "ECR repository URI. deploy.sh reads this to tag and push the image."
+  value       = aws_ecr_repository.aegis_app.repository_url
+}
+
 output "s3_bucket_name" {
   value       = aws_s3_bucket.compliance_lake.id
   description = "The dynamically created secure S3 storage bucket name."

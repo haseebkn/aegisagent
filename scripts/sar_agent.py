@@ -1,25 +1,20 @@
 import argparse
 import json
 import os
-import re
 import sys
 from datetime import datetime
 
 import boto3
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.config import COMPLIANCE_LOGS_DIR, FEAT_M2, FEAT_M3, FEAT_M4  # noqa: F401
+from scripts.config import COMPLIANCE_LOGS_DIR
 from scripts.grounding import check_narrative, correction_prompt
+from scripts.inference_engine import NoAlertsInSample
 from scripts.pii import mask_name, mask_pan
 
 BEDROCK_MODEL_ID = os.environ.get(
     "BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 BEDROCK_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-
-# Retained for reporting only -- vague hedging is a style observation, not grounds to
-# reject a filing. Note the deliberate absence of a bare "may", which collides with the
-# month name and used to discard valid reports mentioning a date in May.
-SPECULATIVE_TERMS = ["might", "possibly", "could", "appears", "may be", "may have", "may indicate"]
 
 def generate_sar_narrative(txn, p_m2, p_m3, p_m4, meta_score, client=None):
     """
@@ -237,17 +232,18 @@ NARRATIVE:
             
     return file_path
 
-def _highest_risk_test_transaction(sample_size):
-    """Score a slice of the real test split and return its riskiest row.
+def _highest_risk_alert(sample_size):
+    """Score a slice of the real test split and return its riskiest ALERT.
 
-    The agent is always driven by genuine model output -- there is no mode in which
-    a narrative is written from invented ensemble scores.
+    The agent is always driven by genuine model output, and only ever reports on a
+    transaction the model actually flagged -- there is no mode in which a narrative
+    is written from invented scores, or from a transaction below the threshold.
     """
     import duckdb
-    import numpy as np
 
     from scripts.config import ARTIFACTS_DIR, DB_PATH
-    from scripts.inference_engine import load_models, run_inference
+    from scripts.inference_engine import (load_models, run_inference,
+                                          select_highest_risk_alert)
 
     con = duckdb.connect(str(DB_PATH))
     try:
@@ -262,24 +258,32 @@ def _highest_risk_test_transaction(sample_size):
     finally:
         con.close()
 
-    meta_probs, p_m2, p_m3, p_m4, _ = run_inference(df, *load_models(ARTIFACTS_DIR))
-    i = int(np.argmax(meta_probs))
+    meta_probs, p_m2, p_m3, p_m4, triggered = run_inference(df, *load_models(ARTIFACTS_DIR))
+    i = select_highest_risk_alert(meta_probs, triggered)
     return (df.iloc[i].to_dict(), float(p_m2[i]), float(p_m3[i]),
-            float(p_m4[i]), float(meta_probs[i]))
+            float(p_m4[i]), float(meta_probs[i]), int(triggered.sum()), len(df))
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate a FINTRAC STR narrative for the riskiest scored transaction.")
-    parser.add_argument('--sample-size', type=int, default=500,
-                        help='How many test-split rows to score before picking the riskiest.')
+        description="Generate a FINTRAC STR narrative for the riskiest alert.")
+    parser.add_argument('--sample-size', type=int, default=10000,
+                        help='Test-split rows to score before picking the riskiest alert. '
+                             'At 0.39%% prevalence a few hundred rows usually contain no '
+                             'alert at all.')
     parser.add_argument('--output-dir', type=str, default=str(COMPLIANCE_LOGS_DIR))
     args = parser.parse_args()
 
     print("=== STR AGENT ===")
     print(f"Scoring {args.sample_size} test transactions with the production ensemble...")
-    txn, p_m2, p_m3, p_m4, meta_score = _highest_risk_test_transaction(args.sample_size)
-    print(f"Riskiest transaction: {txn['trans_num']}  meta-score={meta_score:.4f}  "
+    try:
+        txn, p_m2, p_m3, p_m4, meta_score, n_alerts, n_scored = _highest_risk_alert(
+            args.sample_size)
+    except NoAlertsInSample as e:
+        print(f"No STR generated: {e}")
+        raise SystemExit(1)
+    print(f"{n_alerts} alert(s) in {n_scored:,} scored transactions.")
+    print(f"Riskiest alert: {txn['trans_num']}  meta-score={meta_score:.4f}  "
           f"(base: {p_m2:.4f} / {p_m3:.4f} / {p_m4:.4f})  "
           f"ground-truth is_fraud={int(txn.get('is_fraud', -1))}")
 
