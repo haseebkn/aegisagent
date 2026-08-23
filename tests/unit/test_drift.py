@@ -75,3 +75,31 @@ def test_compare_reports_per_feature_and_sorts_by_severity():
     assert results[0]["feature"] == "drifted_feat"
     assert results[0]["status"] == "SIGNIFICANT"
     assert results[1]["status"] == "stable"
+
+
+def test_collapsed_encoding_is_caught_despite_unchanged_mean():
+    """A broken target-encoding join gives every scoring row the global rate. The mean
+    is unchanged -- on real data 0.005791 before and after -- so any mean-ratio check
+    passes it. PSI sees the collapsed distribution.
+
+    This is why the three target encodings are monitored on their serving-equivalent
+    columns rather than excluded from the gate: excluded, this break could not have
+    failed CI at all.
+    """
+    rng = np.random.default_rng(7)
+    reference = rng.choice([0.002, 0.004, 0.006, 0.009, 0.02], size=20000,
+                           p=[0.2, 0.3, 0.25, 0.15, 0.1])
+    collapsed = np.full(8000, reference.mean())
+
+    assert np.isclose(collapsed.mean(), reference.mean())
+    value = psi(reference, collapsed)
+    assert classify(value) == "SIGNIFICANT"
+
+
+def test_healthy_encoding_comparison_is_stable():
+    """Same encoding map applied to two samples of the same population."""
+    rng = np.random.default_rng(8)
+    levels = [0.002, 0.004, 0.006, 0.009, 0.02]
+    p = [0.2, 0.3, 0.25, 0.15, 0.1]
+    assert classify(psi(rng.choice(levels, 20000, p=p),
+                        rng.choice(levels, 8000, p=p))) == "stable"

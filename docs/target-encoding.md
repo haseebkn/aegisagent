@@ -65,21 +65,48 @@ The comparison is recorded here rather than buried because the number moved the 
 way, and a reader comparing this README against an earlier one deserves the
 explanation.
 
-## Expected side effect on drift monitoring
+## Drift monitoring: measured on serving-equivalent columns
 
-`scripts/drift.py` now reports **MODERATE** drift on `category_risk` (PSI 0.158) and
-`state_risk` (PSI 0.199). This is intended, not a regression.
+Comparing the out-of-fold column on training rows against the full-training column on
+scoring rows measures the encoding *construction*, not the data. It read as MODERATE
+drift on the full dataset (PSI 0.16-0.20) and SIGNIFICANT on the CI fixture (PSI above
+5), in both cases while the means agreed to three decimals.
 
-Training rows carry per-fold encodings while test rows carry a single full-training
-encoding, so the two distributions have genuinely different shapes even though their
-means agree to four decimals (0.006 vs 0.006). PSI measures distributional shift and
-correctly sees it.
+The first attempt at a fix excluded these three features from the drift gate. That was
+wrong: `merchant_risk` and `category_risk` are two of the model's strongest inputs
+(ROC AUC 0.72 each, behind only `amt`), so excluding them meant a broken encoding join
+could never fail the gate. A monitor that cannot fail on its most important features
+invites trust it has not earned.
 
-The distinction that matters: this is drift *by construction* between two encoding
-schemes, not drift in the underlying population. It does not indicate a broken
-pipeline, and it stays below the SIGNIFICANT threshold. If a serving-time monitor is
-ever pointed at live data, the reference distribution should be the training rows'
-*serving-equivalent* encodings, not their out-of-fold ones.
+The mart therefore emits a **serving-equivalent** column per encoding —
+`category_risk_serving`, `state_risk_serving`, `merchant_risk_serving` — holding the
+value each row would receive at scoring time. `scripts/drift.py` measures on those.
+The comparison is apples-to-apples, all 19 monitored features stay under the gate, and
+no exclusion list is needed.
+
+| | Before | After |
+|---|---|---|
+| Full dataset | 0 significant, **2 moderate** | **0 significant, 0 moderate, 19 stable** |
+| CI fixture | **3 significant** (excluded from gate) | **0 significant, 0 moderate, 19 stable** |
+| Features under the gate | 16 of 19 | **19 of 19** |
+
+Models still train on the out-of-fold column; the serving columns are never a model
+input, and `test_serving_equivalent_encodings_are_not_model_inputs` enforces that. On a
+training row the serving value is computed from statistics that include that row, so
+feeding it to a model would reintroduce exactly the leakage out-of-fold encoding exists
+to remove.
+
+**Verified to still catch a real break.** Simulating a failed encoding join — every
+scoring row collapsing to the global fraud rate — leaves the mean *unchanged* at
+0.005791, so any mean-ratio check passes it. PSI flags it at 12.43, SIGNIFICANT.
+
+### A note on the reference window
+
+Train-versus-test is an artifact of this project having two static splits. In a real
+deployment the reference is a rolling window of recent scored traffic compared against
+the current one; both sides are serving-equivalent by definition and the mismatch never
+arises. The serving columns make the static-split comparison behave the way a rolling
+one naturally would.
 
 ## Related
 

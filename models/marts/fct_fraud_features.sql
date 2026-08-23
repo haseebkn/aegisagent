@@ -23,6 +23,10 @@ SELECT
     category_risk,
     state_risk,
     merchant_risk,
+    -- Serving-equivalent encodings: monitoring reference only, never a model input.
+    category_risk_serving,
+    state_risk_serving,
+    merchant_risk_serving,
     -- Card stats
     card_txn_cnt,
     card_mean_amt,

@@ -38,6 +38,15 @@ def test_graph_features_are_not_wired_into_any_model():
         assert not (graph & set(feats))
 
 
+def test_serving_equivalent_encodings_are_not_model_inputs():
+    """The mart emits <encoding>_serving purely as a drift-monitoring reference. On a
+    training row it is computed from statistics that include that row, so feeding it to
+    a model would reintroduce exactly the leakage out-of-fold encoding removes."""
+    serving = {"category_risk_serving", "state_risk_serving", "merchant_risk_serving"}
+    for feats in (config.FEAT_M2, config.FEAT_M3, config.FEAT_M4):
+        assert not (serving & set(feats))
+
+
 def test_resolve_model_dir_follows_version_pointer(tmp_path):
     (tmp_path / "v_test").mkdir()
     (tmp_path / "latest_version.txt").write_text("v_test")

@@ -50,14 +50,26 @@
 ),
 
 {{ name }}_map AS (
-    -- Training rows: subtract the row's own fold from the level statistics.
+    -- Training rows.
+    --   {{ name }}          : out-of-fold, what the model trains on.
+    --   {{ name }}_serving  : the value this row WOULD receive at scoring time, from
+    --                         full training statistics. Never fed to a model -- it is
+    --                         the only apples-to-apples reference for drift
+    --                         monitoring, because comparing an out-of-fold column
+    --                         against a full-training one measures the encoding
+    --                         construction rather than the data. See scripts/drift.py.
     SELECT
         tf.trans_num,
         COALESCE(
             (t.fraud_sum - COALESCE(f.fraud_sum, 0) + {{ smoothing }} * g.global_rate)
             / NULLIF(t.level_count - COALESCE(f.level_count, 0) + {{ smoothing }}, 0),
             g.global_rate
-        ) AS {{ name }}
+        ) AS {{ name }},
+        COALESCE(
+            (t.fraud_sum + {{ smoothing }} * g.global_rate)
+            / NULLIF(t.level_count + {{ smoothing }}, 0),
+            g.global_rate
+        ) AS {{ name }}_serving
     FROM train_folded tf
     CROSS JOIN global_stats g
     LEFT JOIN {{ name }}_totals  t ON tf.{{ key_col }} = t.enc_key
@@ -66,14 +78,20 @@
 
     UNION ALL
 
-    -- Test rows: full training statistics, smoothed.
+    -- Scoring rows: full training statistics, smoothed. No fold to hold out, so the
+    -- served value and the serving-equivalent reference are the same number.
     SELECT
         te.trans_num,
         COALESCE(
             (t.fraud_sum + {{ smoothing }} * g.global_rate)
             / NULLIF(t.level_count + {{ smoothing }}, 0),
             g.global_rate
-        ) AS {{ name }}
+        ) AS {{ name }},
+        COALESCE(
+            (t.fraud_sum + {{ smoothing }} * g.global_rate)
+            / NULLIF(t.level_count + {{ smoothing }}, 0),
+            g.global_rate
+        ) AS {{ name }}_serving
     FROM {{ ref('stg_transactions_test') }} te
     CROSS JOIN global_stats g
     LEFT JOIN {{ name }}_totals t ON te.{{ key_col }} = t.enc_key

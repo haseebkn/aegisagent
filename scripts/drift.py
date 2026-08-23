@@ -35,17 +35,22 @@ MONITORED = sorted(set(FEAT_M2) | set(FEAT_M3) | set(FEAT_M4))
 PSI_MODERATE = 0.10
 PSI_SIGNIFICANT = 0.25
 
-# Target encodings are computed out-of-fold on training rows and from full training
-# statistics on scoring rows, so their distributions differ in SHAPE by construction
-# even when their means agree to four decimals. On the full dataset this reads as
-# MODERATE drift; on a small fixture with few levels it reads as SIGNIFICANT (PSI > 5)
-# purely from per-fold variation.
+# Target encodings are out-of-fold on training rows and full-training on scoring rows,
+# so comparing those columns directly measures the encoding CONSTRUCTION rather than
+# the data -- it reads as MODERATE drift on the full dataset and SIGNIFICANT on a small
+# fixture, in both cases while the means agree to three decimals.
 #
-# They are still measured and reported -- they are only held out of the pass/fail gate,
-# so it flags genuine pipeline regressions rather than a known encoding artifact. Use
-# --gate-all to include them. The proper fix is to compare serving-equivalent encodings
-# for training rows rather than their out-of-fold ones; see docs/target-encoding.md.
-OOF_ENCODED_FEATURES = {"category_risk", "state_risk", "merchant_risk"}
+# The mart therefore also emits a serving-equivalent column per encoding: the value a
+# row would receive at scoring time. Drift is measured on those, which is
+# apples-to-apples and lets every monitored feature stay under the gate. Excluding them
+# instead would have left three of the model's strongest features -- merchant_risk and
+# category_risk both rank above every input except amt -- unable to fail the gate, so a
+# broken encoding join would have passed silently. See docs/target-encoding.md.
+SERVING_EQUIVALENT = {
+    "category_risk": "category_risk_serving",
+    "state_risk": "state_risk_serving",
+    "merchant_risk": "merchant_risk_serving",
+}
 
 
 def psi(expected, actual, bins=10, epsilon=1e-6, discrete_max_levels=20):
@@ -123,21 +128,27 @@ def main():
     parser.add_argument('--current', default='test',
                         help="dataset_split treated as the scoring window.")
     parser.add_argument('--fail-on-significant', action='store_true',
-                        help="Exit non-zero if any gated feature shows significant drift.")
-    parser.add_argument('--gate-all', action='store_true',
-                        help="Include out-of-fold target encodings in the gate. They "
-                             "drift by construction, so this will usually fail.")
+                        help="Exit non-zero if any feature shows significant drift.")
     parser.add_argument('--output', default=None, help="Write JSON report here.")
     args = parser.parse_args()
 
     con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
-        cols = ", ".join(MONITORED)
+        # Alias the serving-equivalent column back to the feature name so the rest of
+        # the report reads naturally.
+        cols = ", ".join(f"{SERVING_EQUIVALENT.get(f, f)} AS {f}" for f in MONITORED)
         ref = con.execute(
             f"SELECT {cols} FROM fct_fraud_features WHERE dataset_split = '{args.reference}'").df()
         cur = con.execute(
             f"SELECT {cols} FROM fct_fraud_features WHERE dataset_split = '{args.current}'").df()
-    finally:
+    except duckdb.BinderException as e:
+        con.close()
+        raise SystemExit(
+            f"Missing serving-equivalent encoding columns: {e}\n"
+            "Rebuild the mart with `dbt run --profiles-dir .` -- drift is measured on "
+            "<encoding>_serving, not on the out-of-fold column the model trains on."
+        ) from e
+    else:
         con.close()
 
     results = compare(ref, cur)
@@ -146,6 +157,9 @@ def main():
     print(f"FEATURE DRIFT: reference='{args.reference}' ({len(ref):,} rows)  "
           f"vs current='{args.current}' ({len(cur):,} rows)")
     print("=" * 78)
+    print(f"Encodings compared on their serving-equivalent columns: "
+          f"{', '.join(sorted(SERVING_EQUIVALENT))}")
+    print("-" * 78)
     print(f"{'feature':<28} {'PSI':>8} {'KS':>7} {'ref mean':>12} {'cur mean':>12}  status")
     print("-" * 78)
     for r in results:
@@ -154,9 +168,6 @@ def main():
 
     significant = [r for r in results if r['status'] == "SIGNIFICANT"]
     moderate = [r for r in results if r['status'] == "MODERATE"]
-    gated_significant = [r for r in significant
-                         if args.gate_all or r['feature'] not in OOF_ENCODED_FEATURES]
-    excluded = [r['feature'] for r in significant if r not in gated_significant]
     print("-" * 78)
     print(f"{len(significant)} significant, {len(moderate)} moderate, "
           f"{len(results) - len(significant) - len(moderate)} stable "
@@ -176,17 +187,13 @@ def main():
                        "results": results}, f, indent=2)
         print(f"\nReport written to {args.output}")
 
-    if excluded:
-        print(f"\nExcluded from the gate (drift by construction, see "
-              f"docs/target-encoding.md): {', '.join(excluded)}")
-
     if args.fail_on_significant:
-        if gated_significant:
-            print(f"\nGATE FAILED: {len(gated_significant)} feature(s) with "
-                  f"significant drift: "
-                  f"{', '.join(r['feature'] for r in gated_significant)}")
+        if significant:
+            print(f"\nGATE FAILED: {len(significant)} feature(s) with significant "
+                  f"drift: {', '.join(r['feature'] for r in significant)}")
             sys.exit(1)
-        print("\nGATE PASSED: no significant drift in gated features.")
+        print(f"\nGATE PASSED: no significant drift across all {len(results)} "
+              f"monitored features.")
 
 
 if __name__ == "__main__":
