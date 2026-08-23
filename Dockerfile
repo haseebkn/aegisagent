@@ -12,10 +12,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code, dbt project, and model artifacts.
 #
-# models_artifacts/ is a BUILD INPUT, not source. It is ~230 MB of joblib and stays
-# out of git, so it must exist locally before `docker build`:
+# models_artifacts/ is a BUILD INPUT, not source. It stays out of git, so it must
+# exist locally before `docker build`:
 #     dbt run --profiles-dir . && python scripts/train_models.py
 # CI does exactly this against a fixture dataset before building.
+#
+# One version is ~244 MB. train_models.py prunes superseded versions (--keep, default
+# 1) because this COPY takes whatever is on disk: six accumulated versions once made
+# a 4 GB image for a model needing 244 MB. CI cannot catch that -- it trains a single
+# tiny fixture model, so the bloat is invisible there by construction.
 COPY dbt_project.yml profiles.yml app.py ./
 COPY models/ ./models/
 COPY scripts/ ./scripts/

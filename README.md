@@ -50,7 +50,7 @@ observed. The full comparison and reasoning is in
 ```
 fraudTrain.csv ─┐
                 ├─► dbt + DuckDB ──► fct_fraud_features ──► stacked ensemble ──► threshold ──► STR agent ──► compliance log
-fraudTest.csv  ─┘   (staging →          (27 columns,        (RF + XGBoost         (0.5832)      (Bedrock)      (local + S3)
+fraudTest.csv  ─┘   (staging →          (27 columns,        (RF + XGBoost         (0.6152)      (Bedrock)      (local + S3)
                      intermediate →      1.85M rows)         + RF → logistic
                      marts)                                  meta-learner)
 ```
@@ -69,8 +69,10 @@ throughout — 70% base / 15% blend / 15% calibration on the training year, with
 meta-learner; the calibration split, which neither the base models nor the
 meta-learner have seen, selects the decision threshold.
 
-**Reporting layer.** Alerts are sent to AWS Bedrock (Claude Haiku 4.5) with a 5W+H
-STR prompt. A retry loop enforces **factual grounding** — every quantity in the
+**Reporting layer.** A transaction only reaches this stage if its meta-score breaches
+the decision threshold — an STR is a consequence of an alert, and the STR paths refuse
+to draft one for anything below it. Alerts are sent to AWS Bedrock (Claude Haiku 4.5)
+with a 5W+H STR prompt. A retry loop enforces **factual grounding** — every quantity in the
 narrative must trace to the payload, and claims about data the pipeline never
 supplied (prior transactions, travel times, device telemetry, linked accounts) are
 rejected. Narratives that still fail are quarantined for review rather than
@@ -110,7 +112,9 @@ the repo root — see `scripts/config.py`.
 ### Container
 
 The image carries the dbt project, scripts and model artifacts, so `models_artifacts/`
-must exist before you build. It is ~230 MB of joblib and is deliberately not in git:
+must exist before you build. One version is ~244 MB of joblib, deliberately not in git.
+`train_models.py` prunes superseded versions (`--keep`, default 1) so the image never
+accumulates dead ones:
 
 ```bash
 dbt run --profiles-dir .

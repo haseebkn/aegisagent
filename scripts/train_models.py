@@ -13,8 +13,10 @@ behaviour drifts and a random split would leak the future into the past):
 The threshold used to be chosen on the same rows the meta-learner was fitted on,
 which made it optimistically biased. The calib split exists solely to break that.
 """
+import argparse
 import json
 import os
+import shutil
 import sys
 from datetime import datetime
 
@@ -41,7 +43,37 @@ def chronological_split(df, fractions=(0.70, 0.15, 0.15)):
     return df.iloc[:c1].copy(), df.iloc[c1:c2].copy(), df.iloc[c2:].copy()
 
 
+def prune_old_versions(artifacts_dir, keep):
+    """Delete superseded version directories, newest-first.
+
+    Each training run writes ~230 MB of joblib into a new v_<timestamp>/ directory.
+    Nothing removed them, so six runs left 1.7 GB on disk -- and because the
+    Dockerfile does `COPY models_artifacts/`, every one of those dead versions was
+    baked into the image, producing a 4 GB build for a model that needs 244 MB.
+    CI never caught it: it trains a single tiny fixture model, so the bloat is
+    invisible there by construction.
+
+    Artifacts are reproducible from code plus data, so retention is a convenience
+    for rollback rather than a safety net.
+    """
+    versions = sorted((d for d in artifacts_dir.glob("v_*") if d.is_dir()),
+                      key=lambda d: d.name, reverse=True)
+    stale = versions[keep:]
+    if not stale:
+        return []
+    for d in stale:
+        shutil.rmtree(d)
+    return [d.name for d in stale]
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--keep", type=int, default=1,
+        help="Version directories to retain after training (default 1: the one just "
+             "trained). Raise it if you want previous versions available to roll back to.")
+    args = parser.parse_args()
+
     print(f"Connecting to DuckDB at {DB_PATH}...")
     con = duckdb.connect(str(DB_PATH))
     df = con.execute("SELECT * FROM fct_fraud_features").df()
@@ -187,6 +219,12 @@ def main():
 
     print(f"Metrics saved to {versioned_dir / 'training_metrics.json'}")
     print(f"latest_version.txt now points at {version_str}")
+
+    removed = prune_old_versions(ARTIFACTS_DIR, max(args.keep, 1))
+    if removed:
+        print(f"Pruned {len(removed)} superseded version(s): {', '.join(removed)}")
+    kept = sorted(d.name for d in ARTIFACTS_DIR.glob("v_*") if d.is_dir())
+    print(f"Retained: {', '.join(kept)}")
 
 
 if __name__ == "__main__":

@@ -22,9 +22,7 @@ import sys
 
 import duckdb
 import numpy as np
-import pandas as pd
-from sklearn.metrics import (average_precision_score, precision_recall_curve,
-                             roc_auc_score)
+from sklearn.metrics import average_precision_score, roc_auc_score
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import ARTIFACTS_DIR, DB_PATH, resolve_model_dir

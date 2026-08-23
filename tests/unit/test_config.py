@@ -1,6 +1,5 @@
 """Path resolution and the feature contract shared by training and serving."""
 import importlib
-import os
 
 import pytest
 
@@ -45,6 +44,14 @@ def test_resolve_model_dir_follows_version_pointer(tmp_path):
     assert config.resolve_model_dir(tmp_path) == tmp_path / "v_test"
 
 
-def test_resolve_model_dir_falls_back_when_pointer_is_stale(tmp_path):
+def test_resolve_model_dir_raises_on_stale_pointer(tmp_path):
+    """Regression: the base dir held a stale pre-versioning artifact set with the
+    wrong threshold, so falling back on a broken pointer silently scored with the
+    wrong models."""
     (tmp_path / "latest_version.txt").write_text("v_does_not_exist")
+    with pytest.raises(FileNotFoundError, match="v_does_not_exist"):
+        config.resolve_model_dir(tmp_path)
+
+
+def test_resolve_model_dir_allows_flat_layout_without_pointer(tmp_path):
     assert config.resolve_model_dir(tmp_path) == tmp_path
