@@ -134,7 +134,7 @@ image is genuinely self-contained rather than relying on a bind mount.
 | Command | Purpose |
 |---|---|
 | `python scripts/evaluate.py --alert-budget 10` | PR AUC by model, operating points across the threshold range, cost-minimising threshold, and the threshold implied by an alert budget. |
-| `python scripts/drift.py --fail-on-significant` | PSI + KS between the training and scoring windows. Exits non-zero on significant drift; runs as a gate in CI. Out-of-fold target encodings are reported but held out of the gate (they differ in shape by construction) — `--gate-all` includes them. |
+| `python scripts/drift.py --fail-on-significant` | PSI + KS between the training and scoring windows, across all 19 model features. Exits non-zero on significant drift; runs as a gate in CI. Target encodings are compared on their serving-equivalent columns so the gate measures data, not encoding construction ([docs/target-encoding.md](docs/target-encoding.md)). |
 | `python scripts/calibration.py` | Brier, ECE/MCE and reliability, reported separately for the alerting region. |
 | `python scripts/graph_signal.py` | Bipartite graph density and univariate power of the entity features. |
 

@@ -90,8 +90,8 @@ jobs:
 
       # The control that would have caught this project's worst bug: velocity
       # features averaging 4.88 in training and 0.014 at scoring time, which every
-      # null and range check passed. Out-of-fold target encodings are reported but
-      # held out of the gate -- they differ in shape by construction, not fault.
+      # null and range check passed. Target encodings are compared on their
+      # serving-equivalent columns, so all 19 model features stay under the gate.
       - name: Feature drift gate
         env:
           DBT_DB_PATH: ci_data/ci.duckdb

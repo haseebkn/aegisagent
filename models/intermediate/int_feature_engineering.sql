@@ -48,6 +48,10 @@ joined AS (
         COALESCE(cat.category_risk, g.global_rate) AS category_risk,
         COALESCE(st.state_risk,     g.global_rate) AS state_risk,
         COALESCE(mer.merchant_risk, g.global_rate) AS merchant_risk,
+        -- Serving-equivalent references, for drift monitoring only.
+        COALESCE(cat.category_risk_serving, g.global_rate) AS category_risk_serving,
+        COALESCE(st.state_risk_serving,     g.global_rate) AS state_risk_serving,
+        COALESCE(mer.merchant_risk_serving, g.global_rate) AS merchant_risk_serving,
         COALESCE(cr.card_txn_cnt, 0) AS card_txn_cnt,
         COALESCE(cr.card_mean_amt, 0.0) AS card_mean_amt,
         COALESCE(cr.card_std_amt, 0.0) AS card_std_amt
@@ -103,6 +107,9 @@ SELECT
     category_risk,
     state_risk,
     merchant_risk,
+    category_risk_serving,
+    state_risk_serving,
+    merchant_risk_serving,
     -- Card stats
     card_txn_cnt,
     card_mean_amt,
