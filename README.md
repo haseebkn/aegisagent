@@ -27,7 +27,7 @@ Measured on the held-out test split (`fraudTest.csv`, 555,719 transactions,
 | Recall | 67.9% |
 | F1 | 0.759 |
 | Frauds caught | 1,457 / 2,145 |
-| Alert volume | 1,696 over 193 days (**8.79/day**) |
+| Alert volume | 1,696 over 193 days (**8.8/day**) |
 | Decision threshold | 0.6152 |
 
 **PR AUC is the headline number.** At 0.39% prevalence a ROC AUC of 0.99 is not
@@ -50,7 +50,7 @@ observed. The full comparison and reasoning is in
 ```
 fraudTrain.csv ─┐
                 ├─► dbt + DuckDB ──► fct_fraud_features ──► stacked ensemble ──► threshold ──► STR agent ──► compliance log
-fraudTest.csv  ─┘   (staging →          (27 columns,        (RF + XGBoost         (0.6152)      (Bedrock)      (local + S3)
+fraudTest.csv  ─┘   (staging →          (36 columns,        (RF + XGBoost         (0.6152)      (Bedrock)      (local + S3)
                      intermediate →      1.85M rows)         + RF → logistic
                      marts)                                  meta-learner)
 ```
@@ -201,10 +201,10 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 | Job | What it does |
 |---|---|
 | Lint | `ruff check` on correctness rules only (F, E9, W6). Exists because dead code accumulated twice, including a function renamed at its definition but not its call site — which no test could catch, since nothing imports it. |
-| Unit tests | 56 pytest cases over PII masking, grounding checks, the alert gate, drift statistics, and path/feature-contract resolution. |
+| Unit tests | 59 pytest cases over PII masking, grounding checks, the alert gate, drift statistics, and path/feature-contract resolution. |
 | dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`), runs the **real** dbt models and data tests against it — no 500 MB download — then runs the drift gate. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
-| Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard for the broken image described below. |
+| Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard: `.dockerignore` once excluded `models/`, `models_artifacts/` and the DuckDB file, and `docker-compose` bind-mounted the repo over `/app`, hiding it. |
 
 Several unit tests are explicit regressions for bugs this project shipped: PSI
 returning infinity on binary features, the grounding checker rejecting a masked PAN
@@ -225,7 +225,9 @@ this project actually shipped:
 
 `scripts/verify_pipeline.py` runs the same skew check plus an end-to-end pass:
 dbt tests → schema/row checks → live inference bounds → STR generation on the
-highest-scoring real transaction in the test split.
+highest-scoring **alert** in the test split. If the sample contains no transaction
+above the threshold it fails rather than reporting on an ordinary one, because an STR
+is a consequence of an alert.
 
 ---
 
@@ -252,11 +254,14 @@ Read this before drawing conclusions from the metrics above.
   out-of-fold ([docs/target-encoding.md](docs/target-encoding.md)).
 - **The meta-score is overconfident in the alerting region** by ~7 points. It is
   usable as a ranking; it should not be read as a probability until calibrated.
-- **No drift monitoring, no champion/challenger, no analyst feedback loop.** These
-  are prerequisites for anything operational.
-- **Deployment is not continuous.** `deploy.sh` is a manual, Windows-oriented script
-  that builds the image, pushes to ECR and applies Terraform. There is no CI
-  pipeline. The ECS service is defined with `desired_count = 0`.
+- **No champion/challenger evaluation and no analyst feedback loop.** Drift is
+  monitored and gated in CI, but there is no mechanism to compare a candidate model
+  against the incumbent, and no path for investigator dispositions to feed back into
+  evaluation. Both are prerequisites for anything operational.
+- **Nothing is actually deployed.** CI builds and verifies the image on every push,
+  but promotion to AWS is a manual `deploy.sh` run, and the ECS service is defined
+  with `desired_count = 0` — the infrastructure is provisioned and exercised, not
+  serving traffic.
 
 ---
 
@@ -268,9 +273,10 @@ Defined in `terraform/`, applied manually:
   versioning, SSE, full public-access block, and lifecycle transition to Glacier at
   90 days.
 - **IAM** task role scoped to `bedrock:InvokeModel` and the compliance bucket; no
-  static keys in the task definition. *Known gap: the Bedrock policy grants the
-  foundation-model ARN but the code calls a cross-region inference profile, which
-  also requires the profile ARN.*
+  static keys in the task definition. The code invokes a cross-region inference
+  profile, so the policy grants the profile ARN *and* the underlying foundation model
+  in each region the profile can route to — granting only a single-region
+  foundation-model ARN produces `AccessDeniedException` at invoke time.
 - **VPC** with a public subnet, IGW and an egress-only security group.
 - **ECR** with scan-on-push and untagged-image expiry.
 - **ECS Fargate** cluster, task definition and service (`desired_count = 0`).
@@ -281,18 +287,33 @@ Defined in `terraform/`, applied manually:
 ## Repository layout
 
 ```
-models/            dbt project (staging → intermediate → marts)
+models/              dbt project (staging → intermediate → marts)
+macros/              out-of-fold target-encoding macro
+docs/
+  str-narrative-design.md  why the hedging blacklist was replaced by grounding checks
+  graph-features.md        entity/graph layer: built, measured, and rejected
+  target-encoding.md       out-of-fold encoding, and the drift reference it implies
+  materialization.md       why incremental materialization was measured and rejected
 scripts/
-  config.py        path + feature-contract resolution shared by every entry point
-  pii.py           PAN / name masking
-  train_models.py  chronological 3-way split, training, versioned artifacts
-  inference_engine.py  validation + scoring
-  sar_agent.py     Bedrock STR generation, guardrails, quarantine, S3 archival
+  config.py            path + feature-contract resolution shared by every entry point
+  pii.py               PAN / name masking
+  grounding.py         factual grounding checks for generated narratives
+  train_models.py      chronological 3-way split, training, versioned artifacts
+  inference_engine.py  validation, scoring, alert selection
+  sar_agent.py         Bedrock STR generation, guardrails, quarantine, S3 archival
+  evaluate.py          PR AUC, operating points, cost-sensitive threshold analysis
+  calibration.py       Brier / ECE / reliability, incl. the alerting region
+  drift.py             PSI + KS between training and scoring windows
+  graph_signal.py      bipartite graph density and univariate feature power
   verify_pipeline.py   end-to-end verification
-  audit_phase1.py  standalone data/artifact audit
-tests/             dbt singular tests
-terraform/         AWS infrastructure
-app.py             Streamlit investigator dashboard
+  audit_phase1.py      standalone data/artifact audit
+tests/
+  *.sql                dbt singular tests (row count, train/serve skew, feature scale)
+  unit/                pytest suite
+  fixtures/            generates a small dataset so CI runs the real dbt pipeline
+terraform/           AWS infrastructure
+.github/workflows/   CI: lint, unit tests, dbt + drift gate, terraform, docker
+app.py               Streamlit investigator dashboard
 ```
 
 ## Roadmap
