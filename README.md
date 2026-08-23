@@ -134,7 +134,7 @@ image is genuinely self-contained rather than relying on a bind mount.
 | Command | Purpose |
 |---|---|
 | `python scripts/evaluate.py --alert-budget 10` | PR AUC by model, operating points across the threshold range, cost-minimising threshold, and the threshold implied by an alert budget. |
-| `python scripts/drift.py --fail-on-significant` | PSI + KS between the training and scoring windows. Exits non-zero on significant drift, so it can gate a scoring run. |
+| `python scripts/drift.py --fail-on-significant` | PSI + KS between the training and scoring windows. Exits non-zero on significant drift; runs as a gate in CI. Out-of-fold target encodings are reported but held out of the gate (they differ in shape by construction) — `--gate-all` includes them. |
 | `python scripts/calibration.py` | Brier, ECE/MCE and reliability, reported separately for the alerting region. |
 | `python scripts/graph_signal.py` | Bipartite graph density and univariate power of the entity features. |
 
@@ -200,10 +200,11 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 
 | Job | What it does |
 |---|---|
-| Unit tests | 49 pytest cases over PII masking, grounding checks, drift statistics and path/feature-contract resolution. |
-| dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`) and runs the **real** dbt models and data tests against it — no 500 MB download needed. |
+| Lint | `ruff check` on correctness rules only (F, E9, W6). Exists because dead code accumulated twice, including a function renamed at its definition but not its call site — which no test could catch, since nothing imports it. |
+| Unit tests | 56 pytest cases over PII masking, grounding checks, the alert gate, drift statistics, and path/feature-contract resolution. |
+| dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`), runs the **real** dbt models and data tests against it — no 500 MB download — then runs the drift gate. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
-| Docker | Builds the image and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. This is a regression guard for the broken image described below. |
+| Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard for the broken image described below. |
 
 Several unit tests are explicit regressions for bugs this project shipped: PSI
 returning infinity on binary features, the grounding checker rejecting a masked PAN

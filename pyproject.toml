@@ -5,3 +5,21 @@
 pythonpath = ["."]
 testpaths = ["tests/unit"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# The capstone notebook is source material, not project code. It is not linted or
+# reformatted here.
+extend-exclude = ["*.ipynb"]
+
+[tool.ruff.lint]
+# Conservative on purpose: correctness rules, not style opinions. F catches the two
+# classes that actually bit this project -- unused imports left by refactors, and
+# undefined names (a function renamed at the definition but not the call site, which
+# no test would catch because nothing imports it).
+select = ["F", "E9", "W6"]
+
+[tool.ruff.lint.per-file-ignores]
+# The audit script prints section banners with f-strings that have no placeholders.
+"scripts/audit_phase1.py" = ["F541"]
