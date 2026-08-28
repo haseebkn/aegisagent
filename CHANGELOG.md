@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.2 — 2026-08-28
+
+Phase 3 CI closure.
+
+- Extended the deterministic CI training fixture from 6,000 to 12,000 rows so its
+  90-day card-history feature reaches a representative steady state.
+- Fixed a false-positive `card_txn_cnt` drift failure: fixture PSI falls from 0.354
+  to 0.055 without changing the production drift thresholds or excluding the feature.
+- Added a regression guard tying the fixture warm-up ratio to the CI row-count contract.
+
 ## 0.4.1 — 2026-08-28
 
 Phase 3 release closure.

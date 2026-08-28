@@ -218,7 +218,7 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 | Job | What it does |
 |---|---|
 | Lint | `ruff check` on correctness rules only (F, E9, W6). Exists because dead code accumulated twice, including a function renamed at its definition but not its call site — which no test could catch, since nothing imports it. |
-| Unit tests | 101 pytest cases over PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, and path resolution. |
+| Unit tests | 102 pytest cases over PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, fixture stability, and path resolution. |
 | dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`), runs the **real** dbt models and data tests against it — no 500 MB download — then runs the drift gate. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
 | Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard: `.dockerignore` once excluded `models/`, `models_artifacts/` and the DuckDB file, and `docker-compose` bind-mounted the repo over `/app`, hiding it. |
@@ -363,7 +363,7 @@ causal feature construction, bounded card history, an evaluation lock, rolling
 validation, confidence intervals, baseline comparison, operating-capacity analysis,
 calibration/slice reporting, and latency measurement. Phase 2 (`0.3.0`) adds the
 persisted human-review and RGS state machine, role and rationale guards, concurrency
-control, case history, dashboard workflow, and CLI. Phase 3 (`0.4.1`) adds atomic
+control, case history, dashboard workflow, and CLI. Phase 3 (`0.4.2`) adds atomic
 case-linked evidence, event hash chaining, local integrity verification, and explicit
 S3 checksum/version receipts. The next priority is authentication, authorization,
 secrets and privacy controls, followed by service architecture and

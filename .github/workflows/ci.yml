@@ -86,7 +86,7 @@ jobs:
         # Block scalar: the "key: value" inside --vars would otherwise be parsed as
         # a YAML mapping rather than passed through as a string.
         run: |
-          dbt test --profiles-dir . --vars '{expected_row_count: 8500}'
+          dbt test --profiles-dir . --vars '{expected_row_count: 14500}'
 
       # The control that would have caught this project's worst bug: velocity
       # features averaging 4.88 in training and 0.014 at scoring time, which every

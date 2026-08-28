@@ -1,6 +1,6 @@
 # AegisAgent model card
 
-**Version:** 0.4.1
+**Version:** 0.4.2
 
 **Status:** portfolio/research baseline
 

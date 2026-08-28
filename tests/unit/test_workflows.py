@@ -1,10 +1,11 @@
 """The CI workflow must be valid YAML.
 
-Regression: `run: dbt test --vars '{expected_row_count: 8500}'` written inline made
+Regression: `run: dbt test --vars '{expected_row_count: 14500}'` written inline made
 GitHub Actions fail at parse time with a 0-second run, because YAML read the
 "key: value" inside the flow mapping as structure rather than as string content.
 A malformed workflow fails silently in the sense that no job ever runs.
 """
+import ast
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 WORKFLOW_DIR = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "make_fixture.py"
 
 
 def workflow_files():
@@ -34,3 +36,24 @@ def test_workflow_defines_jobs_with_steps(path):
     for name, job in doc["jobs"].items():
         assert job.get("steps"), f"job '{name}' has no steps"
         assert job.get("runs-on"), f"job '{name}' has no runner"
+
+
+def test_fixture_reference_is_warm_and_ci_row_contract_matches():
+    """The 90-day card counter needs a long enough reference to leave cold start.
+
+    At 6,000 training rows the fixed fixture produced a false PSI 0.354 alert;
+    12,000 rows produces PSI 0.055 without changing the production drift threshold.
+    """
+    tree = ast.parse(FIXTURE_PATH.read_text(encoding="utf-8"))
+    constants = {
+        node.targets[0].id: ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in {"DEFAULT_TRAIN_ROWS", "DEFAULT_TEST_ROWS"}
+    }
+    assert constants["DEFAULT_TRAIN_ROWS"] >= 4 * constants["DEFAULT_TEST_ROWS"]
+    expected = constants["DEFAULT_TRAIN_ROWS"] + constants["DEFAULT_TEST_ROWS"]
+    workflow_text = "\n".join(path.read_text(encoding="utf-8") for path in workflow_files())
+    assert f"expected_row_count: {expected}" in workflow_text

@@ -19,6 +19,8 @@ COLUMNS = ["column00", "trans_date_trans_time", "cc_num", "merchant", "category"
 CATEGORIES = ["grocery_pos", "shopping_net", "misc_net", "gas_transport",
               "entertainment", "health_fitness", "travel", "kids_pets"]
 STATES = ["NC", "MA", "IL", "CA", "NY", "TX"]
+DEFAULT_TRAIN_ROWS = 12000
+DEFAULT_TEST_ROWS = 2500
 
 
 def generate(rows, start, cards, merchants, fraud_rate, rng, row_offset=0):
@@ -65,8 +67,13 @@ def write(path, rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-dir", default=".")
-    ap.add_argument("--train-rows", type=int, default=6000)
-    ap.add_argument("--test-rows", type=int, default=2500)
+    # A long reference window is intentional. With only 6,000 rows, the first 90
+    # days of card-history warm-up made up enough of the training distribution to
+    # create a false-positive card_txn_cnt drift alert (PSI 0.354) even though the
+    # feature pipeline was correct. At 12,000 rows it reaches a representative
+    # steady state while keeping CI small (PSI 0.055 on the fixed seed).
+    ap.add_argument("--train-rows", type=int, default=DEFAULT_TRAIN_ROWS)
+    ap.add_argument("--test-rows", type=int, default=DEFAULT_TEST_ROWS)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
 
