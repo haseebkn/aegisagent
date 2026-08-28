@@ -47,8 +47,8 @@ variable "bedrock_profile_regions" {
 # AMAZON S3 VERSIONED EVIDENCE REFERENCE
 # =====================================================================
 resource "aws_s3_bucket" "compliance_lake" {
-  bucket              = "${var.project_name}-compliance-logs-${data.aws_caller_identity.current.account_id}"
-  force_destroy       = false
+  bucket        = "${var.project_name}-compliance-logs-${data.aws_caller_identity.current.account_id}"
+  force_destroy = false
   # Object Lock demonstrates immutable-object infrastructure. Retention suitability
   # remains an institution-specific legal, records-management, and operational decision.
   object_lock_enabled = true
@@ -81,7 +81,7 @@ resource "aws_s3_bucket_versioning" "compliance_lake_versioning" {
 
 # 2. Apply WORM (Write Once Read Many) Object Lock
 resource "aws_s3_bucket_object_lock_configuration" "compliance_lake_lock" {
-  bucket = aws_s3_bucket.compliance_lake.id
+  bucket     = aws_s3_bucket.compliance_lake.id
   depends_on = [aws_s3_bucket_versioning.compliance_lake_versioning]
 
   rule {

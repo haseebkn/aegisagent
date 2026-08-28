@@ -363,7 +363,7 @@ causal feature construction, bounded card history, an evaluation lock, rolling
 validation, confidence intervals, baseline comparison, operating-capacity analysis,
 calibration/slice reporting, and latency measurement. Phase 2 (`0.3.0`) adds the
 persisted human-review and RGS state machine, role and rationale guards, concurrency
-control, case history, dashboard workflow, and CLI. Phase 3 (`0.4.0`) adds atomic
+control, case history, dashboard workflow, and CLI. Phase 3 (`0.4.1`) adds atomic
 case-linked evidence, event hash chaining, local integrity verification, and explicit
 S3 checksum/version receipts. The next priority is authentication, authorization,
 secrets and privacy controls, followed by service architecture and

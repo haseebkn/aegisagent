@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1 — 2026-08-28
+
+Phase 3 release closure.
+
+- Applied canonical Terraform formatting to the versioned evidence-bucket reference.
+- Re-ran Terraform formatting and configuration validation alongside the complete
+  Python regression, lint, compilation, and Git-diff gates.
+- Supersedes `0.4.0` as the fully release-verified Phase 3 baseline.
+
 ## 0.4.0 — 2026-08-28
 
 Phase 3 links narrative evidence to cases and makes integrity failures observable.
