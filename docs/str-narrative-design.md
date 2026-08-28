@@ -13,7 +13,7 @@ This note records why, because the reasoning matters more than the code.
 
 ## Why "zero hedging" is the wrong target
 
-Section 7 of the PCMLTFA requires a reporting entity to file where it has
+Section 7 of the PCMLTFA requires a reporting entity to report where it has
 **reasonable grounds to suspect** that a transaction is related to a money
 laundering or terrorist financing offence. Two features of that standard bear
 directly on how a narrative should read:
@@ -57,8 +57,8 @@ with a five-year retention lock, and neither could then be deleted.
 **It produced false positives with real consequences.** The pattern `\bmay\b`
 matches the month name. Any narrative referencing a date in May failed validation,
 and `save_sar_report` raised — silently discarding a report for an alert that had
-already been raised. An unlogged failure to file is a worse compliance posture than
-an imperfect draft.
+already been raised. Silently losing an alert draft also makes the prototype
+impossible to audit.
 
 **It was trivially satisfiable.** "Might indicate" fails; "indicates" passes. The
 filter rewards deleting the qualifier while keeping the unsupported claim, which is
@@ -86,7 +86,7 @@ telemetry, linked accounts, KYC records, case history, customer contact. These a
 fabrications regardless of how confidently they are phrased.
 
 **3. Advisory style note.** Vague hedging is still recorded, but it is an
-observation, not grounds to reject a filing.
+observation, not grounds to reject a draft.
 
 The system prompt was rewritten to match: it now forbids inventing figures,
 forbids referencing unsupplied data, forbids cross-window comparisons, and
@@ -94,8 +94,8 @@ explicitly instructs the model to separate observation from inference and to avo
 overstating certainty.
 
 Narratives that fail grounding are written to `compliance_logs/quarantine/` with the
-verdict attached, then raise. Nothing is silently dropped. Filed reports carry the
-grounding verdict inline.
+verdict attached, then raise. Nothing is silently dropped. Saved drafts carry the
+grounding verdict inline and remain unapproved and unsubmitted.
 
 ### Validation
 
@@ -130,6 +130,6 @@ false positives.
 ## Bearing on the wider system
 
 The same principle applies to the alerts themselves. A model score is a ranking, not
-a finding. The threshold that converts it into an alert is a business decision about
+a finding or an RGS determination. The threshold that converts it into an alert is a business decision about
 how much investigator time a fraud is worth — which is why `scripts/evaluate.py`
 reports alert volume and cost-weighted operating points rather than AUC alone.

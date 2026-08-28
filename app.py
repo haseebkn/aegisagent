@@ -18,7 +18,7 @@ from scripts.sar_agent import generate_sar_narrative, save_sar_report
 
 # Page config
 st.set_page_config(
-    page_title="AegisAgent Compliance Dashboard",
+    page_title="AegisAgent Investigation Demo",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -297,8 +297,12 @@ FRAUD_DEMO_TXN = {
 }
 
 # Main Application Title
-st.markdown('<h1 class="app-title">🛡️ AegisAgent: Stacking Ensemble & Regulatory Compliance Dashboard</h1>', unsafe_allow_html=True)
-st.markdown("Monitor real-time card transactions, evaluate stacking ensemble threat levels, and generate regulatory filings.")
+st.markdown('<h1 class="app-title">🛡️ AegisAgent: Fraud Investigation Support Demo</h1>', unsafe_allow_html=True)
+st.markdown(
+    "Explore historical synthetic card transactions, inspect ensemble alert scores, "
+    "and generate a 5W+H investigation narrative draft. This demo does not make a "
+    "reasonable-grounds-to-suspect (RGS) determination or submit a report to FINTRAC."
+)
 
 # Sidebar Controls
 st.sidebar.header("🔍 Transaction Selection")
@@ -339,7 +343,7 @@ if telemetry:
     st.sidebar.write(f"**Decision Threshold:** `{telemetry.get('optimal_threshold', 0.0):.4f}`")
     st.sidebar.caption(f"Selected on: {telemetry.get('threshold_selected_on', 'n/a')}")
 
-    st.sidebar.markdown("**Held-out test performance**")
+    st.sidebar.markdown("**Development-holdout performance**")
     st.sidebar.write(f"- PR AUC: `{telemetry.get('test_pr_auc_meta', 0.0):.4f}`")
     st.sidebar.write(f"- ROC AUC: `{telemetry.get('test_auc_meta', 0.0):.4f}`")
     st.sidebar.write(f"- Precision: `{telemetry.get('test_precision', 0.0):.2%}`")
@@ -470,9 +474,9 @@ with col_right:
     </div>
     """, unsafe_allow_html=True)
 
-# 3. Regulatory Agent Preview Section
+# 3. Investigation Narrative Preview Section
 st.markdown("<div class='custom-hr'></div>", unsafe_allow_html=True)
-st.subheader("📋 Regulatory agent (FINTRAC STR Generator)")
+st.subheader("📋 Investigation narrative drafting assistant")
 
 def markdown_to_html(text):
     # Convert bold **text** to <strong>text</strong>
@@ -560,7 +564,7 @@ def render_parsed_compliance_report(narrative):
         "WHAT": {"icon": "💳", "title": "What (Transaction Facts)", "color": "#79c0ff", "rgb": "121, 192, 255"},
         "WHEN": {"icon": "📅", "title": "When (Temporal Context)", "color": "#56d364", "rgb": "86, 211, 100"},
         "WHERE": {"icon": "📍", "title": "Where (Geographic Mapping)", "color": "#f8e3a1", "rgb": "248, 227, 161"},
-        "WHY": {"icon": "🔍", "title": "Why (Regulatory grounds for suspicion)", "color": "#ff7b72", "rgb": "255, 123, 114"},
+        "WHY": {"icon": "🔍", "title": "Why (Signals for investigator assessment)", "color": "#ff7b72", "rgb": "255, 123, 114"},
         "HOW": {"icon": "⚙️", "title": "How (Ensemble Alert consensus)", "color": "#d2a8ff", "rgb": "210, 168, 255"}
     }
     
@@ -613,7 +617,12 @@ def render_parsed_compliance_report(narrative):
             """, unsafe_allow_html=True)
 
 if triggered:
-    st.info("The stacked classifier has breached the compliance threshold. A Suspicious Transaction Report (STR) filing is required under the PCMLTFA guidelines.")
+    st.warning(
+        "The transaction exceeded the model's alert threshold and should be reviewed. "
+        "An alert is not an RGS determination and does not by itself require an STR. "
+        "A reporting entity's authorized investigator must assess the facts, context, "
+        "and applicable ML/TF indicators."
+    )
     
     # Store the narrative state in st.session_state to persist across button clicks/renders
     if "narrative" not in st.session_state:
@@ -629,46 +638,53 @@ if triggered:
     btn_col, status_col = st.columns([1, 3])
     
     with btn_col:
-        generate_btn = st.button("Generate STR Narrative 🚀", use_container_width=True)
+        generate_btn = st.button("Generate Narrative Draft 🚀", use_container_width=True)
         
     with status_col:
         s3_bucket = os.environ.get("COMPLIANCE_S3_BUCKET")
         if s3_bucket:
-            st.markdown(f"🔒 **Compliance Archival Target:** S3 Bucket `{s3_bucket}`")
+            st.markdown(f"🔒 **Optional Draft Archive:** S3 Bucket `{s3_bucket}`")
         else:
-            st.markdown("⚠️ **Compliance Archival Target:** Not configured (`COMPLIANCE_S3_BUCKET` missing)")
+            st.markdown("ℹ️ **Optional Draft Archive:** Not configured (`COMPLIANCE_S3_BUCKET` missing)")
             
     if generate_btn:
-        with st.spinner("Invoking compliance agent (AWS Bedrock / Claude)..."):
+        with st.spinner("Invoking narrative drafting assistant (AWS Bedrock / Claude)..."):
             narrative = generate_sar_narrative(
                 selected_txn, p_m2_val, p_m3_val, p_m4_val, meta_score
             )
             if narrative:
                 st.session_state.narrative = narrative
-                st.success("Filing narrative successfully generated.")
+                st.success("Investigation narrative draft generated for human review.")
             else:
-                st.error("Failed to generate compliance report. Please verify AWS credentials and Bedrock runtime access.")
+                st.error("Failed to generate a narrative draft. Please verify AWS credentials and Bedrock runtime access.")
                 
     if st.session_state.narrative:
-        st.markdown("#### Preview STR 5W+H Filing")
+        st.markdown("#### Preview 5W+H Investigation Narrative (Draft — Not Filed)")
         
         # Render narrative using the parsed HTML/Markdown layout cards
         render_parsed_compliance_report(st.session_state.narrative)
         
-        # Action button to save to vault
+        # Action button to save a draft artifact. This is not a FINTRAC submission.
         st.write("")
-        if st.button("Submit & Lock Report in Compliance Vault 🔒"):
-            with st.spinner("Executing compliance protocol and checking speculative language guardrails..."):
+        if st.button("Validate & Save Draft 🔒"):
+            with st.spinner("Checking factual-grounding guardrails and saving the draft..."):
                 try:
                     file_path = save_sar_report(
                         selected_txn, p_m2_val, p_m3_val, p_m4_val, meta_score, st.session_state.narrative
                     )
-                    st.success(f"Report verified & saved locally to `{file_path}`")
+                    st.success(f"Draft verified and saved locally to `{file_path}`")
                     if s3_bucket:
-                        st.info(f"Report successfully uploaded and locked in compliance S3 bucket: `{s3_bucket}`")
+                        st.info(
+                            f"The save routine attempted optional archival to `{s3_bucket}`. "
+                            "This prototype does not return or verify an S3 receipt; inspect "
+                            "runtime logs before treating the archive as durable."
+                        )
                 except ValueError as ve:
-                    st.error(f"Compliance Aborted: {ve}")
+                    st.error(f"Draft validation failed: {ve}")
                 except Exception as ex:
-                    st.error(f"Failed to complete compliance protocol: {ex}")
+                    st.error(f"Failed to save the narrative draft: {ex}")
 else:
-    st.success("This transaction does not breach the risk threshold. No suspicious activity report required.")
+    st.success(
+        "This transaction does not exceed the model's alert threshold. No model alert "
+        "was created; this is not a regulatory determination."
+    )

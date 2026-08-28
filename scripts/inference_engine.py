@@ -104,17 +104,17 @@ def select_highest_risk_alert(meta_probs, triggered):
 
     Taking a plain argmax over the sample is wrong: at 0.39% prevalence a few
     hundred rows usually contain no alert at all, so the "riskiest" row is a
-    perfectly ordinary transaction. Drafting a Suspicious Transaction Report for it
-    -- as this pipeline did, on a transaction scoring 0.0040 against a 0.6152
-    threshold -- states suspicion the model does not hold, and then reports the run
-    as compliant. An STR is a consequence of an alert; no alert means no report.
+    perfectly ordinary transaction. Drafting an investigation narrative for it—as
+    this pipeline once did, on a transaction scoring 0.0040 against a 0.6152
+    threshold—would fabricate a model alert. The gate establishes alert eligibility
+    only; it does not establish RGS or a reporting obligation.
     """
     alert_idx = np.flatnonzero(triggered)
     if alert_idx.size == 0:
         raise NoAlertsInSample(
             f"No transaction in this sample of {len(meta_probs)} breached the "
-            f"decision threshold (max score {meta_probs.max():.4f}). An STR is only "
-            f"meaningful for an alert. Increase the sample size so it contains one."
+            f"decision threshold (max score {meta_probs.max():.4f}). A narrative draft "
+            f"is only generated for an alert. Increase the sample size so it contains one."
         )
     return int(alert_idx[np.argmax(meta_probs[alert_idx])])
 

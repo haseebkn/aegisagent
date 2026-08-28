@@ -48,7 +48,7 @@ never be scored on its own label.
 | `merchant_fraud_card_ratio` | that count over the merchant's other cards |
 | `card_2hop_fraud_cards` | distinct fraud cards sharing ≥1 merchant with this card |
 
-## Univariate signal (held-out test split)
+## Univariate signal (development holdout)
 
 Base rate — the PR AUC of a random ranker — is 0.0039.
 
@@ -77,7 +77,7 @@ Univariate AUC measures whether a feature *can* separate the classes. It does no
 measure what the feature adds on top of the features already present. The three
 graph features with signal were added to Model 4 and the ensemble retrained.
 
-| Held-out test | Without graph features | With graph features |
+| Development holdout | Without graph features | With graph features |
 |---|---|---|
 | Model 4 PR AUC | **0.7974** | 0.1797 |
 | Meta PR AUC | **0.8010** | 0.6063 |

@@ -47,7 +47,7 @@ def main():
 
     y = df['is_fraud'].to_numpy()
     print("=" * 70)
-    print("UNIVARIATE DISCRIMINATIVE POWER (held-out test split)")
+    print("UNIVARIATE DISCRIMINATIVE POWER (development holdout)")
     print("=" * 70)
     print(f"{'feature':<30} {'ROC AUC':>9} {'PR AUC':>9}   verdict")
     print("-" * 70)

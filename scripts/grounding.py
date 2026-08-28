@@ -1,4 +1,4 @@
-"""Factual grounding checks for generated STR narratives.
+"""Factual grounding checks for generated investigation narrative drafts.
 
 The original guardrail screened a blacklist of hedging words. That is the wrong
 control in two directions at once:

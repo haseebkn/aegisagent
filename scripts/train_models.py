@@ -1,14 +1,17 @@
 """Train the stacked fraud ensemble.
 
-Split design (chronological throughout -- no random shuffling, because fraud
-behaviour drifts and a random split would leak the future into the past):
+Model-fitting split design (chronological, with no random row shuffling):
 
     fraudTrain.csv   -> 70% base    : fit Models 2/3/4
                      -> 15% blend   : fit the logistic meta-learner on base-model
                                       probabilities the base models have not seen
-                     -> 15% calib   : select the decision threshold, and report
-                                      honest pre-deployment metrics
-    fraudTest.csv    -> untouched until final evaluation
+                     -> 15% calib   : select the demo decision threshold
+    fraudTest.csv    -> later development holdout used for iterative evaluation
+
+Important: this is not end-to-end temporal isolation. Upstream random-fold target
+encodings and full-window card statistics expose later training-period information
+to earlier rows, and fraudTest.csv has informed feature decisions. The resulting
+metrics are development evidence, not final blind-test or pre-deployment estimates.
 
 The threshold used to be chosen on the same rows the meta-learner was fitted on,
 which made it optimistically biased. The calib split exists solely to break that.
@@ -85,7 +88,7 @@ def main():
 
     base_df, blend_df, calib_df = chronological_split(train_full_df)
     print(f"Chronological split -> base: {len(base_df):,} | blend: {len(blend_df):,} "
-          f"| calib: {len(calib_df):,} | held-out test: {len(test_df):,}")
+          f"| calib: {len(calib_df):,} | development holdout: {len(test_df):,}")
 
     y_base = base_df['is_fraud'].values
     y_blend = blend_df['is_fraud'].values
@@ -144,8 +147,8 @@ def main():
     calib_f1 = float(f1_scores[best_idx])
     print(f"Optimal threshold (chosen on calib, F1={calib_f1:.4f}): {best_thresh:.4f}")
 
-    # ---------------- FINAL EVALUATION ON THE HELD-OUT TEST SET ----------------
-    print("\nEvaluating on the held-out test split...")
+    # ---------------- ITERATIVE EVALUATION ON THE DEVELOPMENT HOLDOUT -----------
+    print("\nEvaluating on the reused development-holdout split...")
     te_p2, te_p3, te_p4 = base_probs(test_df)
     meta_probs = meta_model.predict_proba(np.column_stack([te_p2, te_p3, te_p4]))[:, 1]
 

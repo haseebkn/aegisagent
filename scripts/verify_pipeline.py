@@ -1,9 +1,9 @@
 """End-to-end pipeline verification.
 
 Every stage runs against real artifacts and real data. In particular, stage 4 no
-longer hands the STR agent hardcoded ensemble scores: it pulls the highest-risk
-transaction the live models actually produce and reports on that, so the
-DB -> dbt features -> ensemble -> Bedrock -> compliance-log path is exercised
+longer hands the narrative assistant hardcoded ensemble scores: it pulls the
+highest-risk alert the model artifacts actually produce and drafts from that, so the
+DB -> dbt features -> ensemble -> Bedrock -> local-draft path is exercised
 end to end.
 """
 import os
@@ -84,7 +84,7 @@ def verify_duckdb_schema():
 
 
 def _load_scored_test_sample(limit=10000):
-    """Score a real slice of the test split with the production artifacts."""
+    """Score a real slice of the development holdout with the demo artifacts."""
     con = duckdb.connect(str(DB_PATH))
     try:
         df = con.execute(f"""
@@ -122,8 +122,8 @@ def verify_inference_bounds():
 
 
 def verify_sar_agent():
-    print("\n--- 4. VERIFYING AGENTIC STR GENERATION (FINTRAC) ---")
-    print("Selecting the highest-risk ALERT from the test split...")
+    print("\n--- 4. VERIFYING INVESTIGATION NARRATIVE DRAFTING ---")
+    print("Selecting the highest-risk ALERT from the development holdout...")
     df, meta_probs, p_m2, p_m3, p_m4, triggered = _load_scored_test_sample()
 
     try:
@@ -142,10 +142,10 @@ def verify_sar_agent():
     narrative = generate_sar_narrative(
         txn, float(p_m2[idx]), float(p_m3[idx]), float(p_m4[idx]), meta_score)
     if not narrative:
-        print("ERROR: Failed to generate STR narrative.")
+        print("ERROR: Failed to generate an investigation narrative draft.")
         return False
 
-    print("\nGenerated STR Narrative Preview:")
+    print("\nGenerated Investigation Narrative Draft Preview (not filed):")
     print("-" * 50)
     print(narrative[:600] + "...")
     print("-" * 50)
@@ -176,11 +176,11 @@ def verify_sar_agent():
         file_path = save_sar_report(
             txn, float(p_m2[idx]), float(p_m3[idx]), float(p_m4[idx]), meta_score, narrative)
     except ValueError as e:
-        print(f"COMPLIANCE_ERROR: {e}")
+        print(f"DRAFT_VALIDATION_ERROR: {e}")
         return False
 
     if os.path.exists(file_path):
-        print(f"STR report verified: File exists at {file_path}")
+        print(f"Narrative draft verified: file exists at {file_path}")
         return True
     return False
 
@@ -194,7 +194,7 @@ def main():
         ("dbt tests", run_dbt_tests),
         ("DuckDB checks", verify_duckdb_schema),
         ("Inference bounds", verify_inference_bounds),
-        ("STR Agent", verify_sar_agent),
+        ("Narrative drafting", verify_sar_agent),
     ]
     for i, (name, fn) in enumerate(stages, start=1):
         if not fn():
@@ -202,7 +202,7 @@ def main():
             sys.exit(1)
 
     print("\n" + "=" * 70)
-    print("        ALL STAGES SUCCESSFUL! PIPELINE VERIFIED AND COMPLIANT.")
+    print("        ALL STAGES SUCCESSFUL! DEMO PIPELINE VERIFIED.")
     print("=" * 70)
 
 

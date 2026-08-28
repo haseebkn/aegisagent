@@ -1,7 +1,7 @@
 """Threshold and cost analysis for the stacked ensemble.
 
-A fraud model is not deployed at "the F1-optimal threshold". It is deployed at the
-operating point an investigations team can actually staff, given what a missed fraud
+A fraud model should not be operated at "the F1-optimal threshold" by default. Its
+operating point must reflect what an investigations team can actually staff, given what a missed fraud
 costs and what an investigator hour costs. This script reports that trade-off
 explicitly, following the cost-sensitive framing in Bahnsen et al. (2016).
 
@@ -86,7 +86,7 @@ def main():
                      - df['trans_date_trans_time'].min()).days, 1)
 
     print("=" * 74)
-    print("RANKING QUALITY (held-out test split)")
+    print("RANKING QUALITY (reused development holdout)")
     print("=" * 74)
     print(f"Transactions: {len(y):,}   Frauds: {int(y.sum()):,} "
           f"({y.sum()/len(y):.3%} prevalence)   Span: {span_days} days")
@@ -120,9 +120,9 @@ def main():
     deployed = cost_at(y, amounts, meta_p, deployed_threshold, args.investigation_cost)
 
     print("\n" + "=" * 74)
-    print("COST-MINIMISING vs DEPLOYED THRESHOLD")
+    print("COST-MINIMISING vs CURRENT DEMO THRESHOLD")
     print("=" * 74)
-    for label, r in [("Deployed (F1-optimal on calib)", deployed),
+    for label, r in [("Current demo (F1-optimal on calib)", deployed),
                      ("Cost-minimising", best)]:
         print(f"\n{label}: threshold={r['threshold']:.4f}")
         print(f"  alerts={r['alerts']:,} ({r['alerts']/span_days:.1f}/day)  "

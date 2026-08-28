@@ -18,7 +18,10 @@ BEDROCK_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 
 def generate_sar_narrative(txn, p_m2, p_m3, p_m4, meta_score, client=None):
     """
-    Constructs the prompt and queries Amazon Bedrock to generate a definitive 5W+H STR narrative.
+    Generate a grounded 5W+H investigation narrative draft for human review.
+
+    The legacy function name is retained for compatibility. Its output is neither an
+    RGS determination nor a completed or submitted FINTRAC STR.
     """
     if client is None or isinstance(client, str):
         client = boto3.client('bedrock-runtime', region_name=BEDROCK_REGION)
@@ -31,12 +34,13 @@ def generate_sar_narrative(txn, p_m2, p_m3, p_m4, meta_score, client=None):
     
     # 2. System and User Prompt
     system_instruction = (
-        "You are an expert FINTRAC compliance officer drafting a Suspicious Transaction "
-        "Report (STR) under the Proceeds of Crime (Money Laundering) and Terrorist "
-        "Financing Act (PCMLTFA) and FINTRAC guidelines.\n"
+        "You are assisting a Canadian financial-crime investigator by drafting a 5W+H "
+        "investigation narrative from the supplied transaction and model signals. This "
+        "is a decision-support draft, not a completed or submitted FINTRAC STR.\n"
         "Your narrative must follow the 5W+H framework (Who, What, When, Where, Why, How).\n"
-        "The WHY section must frame the analysis around the Canadian legal threshold "
-        "'Reasonable Grounds to Suspect' (RGS), citing the PCMLTFA and FINTRAC guidelines.\n"
+        "The WHY section must identify which observations merit human assessment under "
+        "the Canadian reasonable-grounds-to-suspect (RGS) framework. Do not state that "
+        "RGS has been reached and do not recommend or claim that a filing is required.\n"
         "GROUNDING RULES -- these govern everything else:\n"
         "1. Every figure you state must appear in the transaction payload below, or be "
         "arithmetic derived from figures in it. Never invent a number.\n"
@@ -46,8 +50,9 @@ def generate_sar_narrative(txn, p_m2, p_m3, p_m4, meta_score, client=None):
         "3. Do not compare measurements taken over different time windows as though they "
         "were the same quantity (a 7-day count is not a rate relative to a 24-hour count).\n"
         "4. Separate observation from inference. State the observed facts, then state what "
-        "they ground a suspicion of. An STR records reasonable grounds to SUSPECT; it does "
-        "not assert proven conclusions, and overstating certainty is a defect, not a "
+        "they may support further assessment of. The reporting entity's authorized human "
+        "reviewer—not this model—determines whether RGS is reached. Do not assert proven "
+        "conclusions, and remember that overstating certainty is a defect, not a "
         "virtue. Write plainly and avoid vague hedging, but never claim more than the data "
         "supports.\n"
         "Output exactly the sections WHO, WHAT, WHEN, WHERE, WHY, HOW, with no preamble "
@@ -79,7 +84,7 @@ Stacked Ensemble Results:
 - Stacked Meta-Model Score: {meta_score:.4f}
 - Flagging Models: {voting_str}
 
-Generate the FINTRAC STR 5W+H narrative now. Use only the figures above. The WHY section must cite the PCMLTFA and FINTRAC guidelines and explain which of these observations ground a reasonable suspicion, and of what."""
+Generate the 5W+H investigation narrative draft now. Use only the figures above. The WHY section may identify observations relevant to an investigator's RGS assessment, but it must not claim that RGS has been reached or that an STR must be filed."""
     
     messages = [
         {
@@ -158,8 +163,7 @@ def save_sar_report(txn, p_m2, p_m3, p_m4, meta_score, narrative, output_dir=Non
     # 1. Factual grounding review.
     #
     # A narrative that fails is quarantined rather than discarded. Silently dropping
-    # it meant an alert that reached the reporting stage left no trace at all, which
-    # is a worse compliance posture than an imperfect draft in a review queue.
+    # it meant an alert that reached the drafting stage left no trace at all.
     report = check_narrative(narrative, txn, p_m2, p_m3, p_m4, meta_score)
     if not report.ok:
         quarantine_dir = os.path.join(output_dir, "quarantine")
@@ -182,12 +186,13 @@ def save_sar_report(txn, p_m2, p_m3, p_m4, meta_score, narrative, output_dir=Non
 
     trans_num = txn.get('trans_num', 'unknown')
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_name = f"STR_{trans_num}_{timestamp}.txt"
+    file_name = f"STR_DRAFT_{trans_num}_{timestamp}.txt"
     file_path = os.path.join(output_dir, file_name)
     
     report_content = f"""======================================================================
-SUSPICIOUS TRANSACTION REPORT (STR) -- CONFIDENTIAL (FINTRAC)
-Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+INVESTIGATION NARRATIVE DRAFT -- NOT A FINTRAC FILING
+Generated for human review: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Status: DRAFT / NOT APPROVED / NOT SUBMITTED
 ======================================================================
 METADATA:
 Transaction Number:     {trans_num}
@@ -213,12 +218,12 @@ NARRATIVE:
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(report_content)
         
-    print(f"STR report written to: {file_path}")
+    print(f"Investigation narrative draft written to: {file_path}")
 
     # S3 Upload logic
     s3_bucket = os.environ.get("COMPLIANCE_S3_BUCKET")
     if s3_bucket:
-        print(f"COMPLIANCE_S3_BUCKET is configured. Uploading STR to S3 bucket: {s3_bucket}...")
+        print(f"COMPLIANCE_S3_BUCKET is configured. Uploading draft to S3 bucket: {s3_bucket}...")
         try:
             s3_client = boto3.client('s3')
             s3_client.put_object(
@@ -226,9 +231,9 @@ NARRATIVE:
                 Key=file_name,
                 Body=report_content.encode('utf-8')
             )
-            print(f"SUCCESS: STR report uploaded to S3 bucket '{s3_bucket}' with key '{file_name}'.")
+            print(f"SUCCESS: Draft uploaded to S3 bucket '{s3_bucket}' with key '{file_name}'.")
         except Exception as e:
-            print(f"ERROR: Failed to upload STR report to S3: {e}")
+            print(f"ERROR: Failed to upload draft to S3: {e}")
             
     return file_path
 
@@ -266,7 +271,7 @@ def _highest_risk_alert(sample_size):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate a FINTRAC STR narrative for the riskiest alert.")
+        description="Generate a 5W+H investigation narrative draft for the riskiest alert.")
     parser.add_argument('--sample-size', type=int, default=10000,
                         help='Test-split rows to score before picking the riskiest alert. '
                              'At 0.39%% prevalence a few hundred rows usually contain no '
@@ -274,13 +279,13 @@ def main():
     parser.add_argument('--output-dir', type=str, default=str(COMPLIANCE_LOGS_DIR))
     args = parser.parse_args()
 
-    print("=== STR AGENT ===")
-    print(f"Scoring {args.sample_size} test transactions with the production ensemble...")
+    print("=== INVESTIGATION NARRATIVE DRAFTING ASSISTANT ===")
+    print(f"Scoring {args.sample_size} development-holdout transactions with demo artifacts...")
     try:
         txn, p_m2, p_m3, p_m4, meta_score, n_alerts, n_scored = _highest_risk_alert(
             args.sample_size)
     except NoAlertsInSample as e:
-        print(f"No STR generated: {e}")
+        print(f"No narrative draft generated: {e}")
         raise SystemExit(1)
     print(f"{n_alerts} alert(s) in {n_scored:,} scored transactions.")
     print(f"Riskiest alert: {txn['trans_num']}  meta-score={meta_score:.4f}  "
@@ -292,14 +297,14 @@ def main():
         print("Failed to generate narrative. Verify AWS credentials and Bedrock access.")
         return
 
-    print("\nGenerated STR Narrative:\n")
+    print("\nGenerated Investigation Narrative Draft (not filed):\n")
     print(narrative)
     print("=" * 60)
 
     try:
         save_sar_report(txn, p_m2, p_m3, p_m4, meta_score, narrative, args.output_dir)
     except ValueError as e:
-        print(f"COMPLIANCE_ERROR: {e}")
+        print(f"DRAFT_VALIDATION_ERROR: {e}")
 
 
 if __name__ == "__main__":

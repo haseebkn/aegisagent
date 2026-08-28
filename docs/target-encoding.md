@@ -21,7 +21,7 @@ They are now computed **out-of-fold with empirical-Bayes smoothing**
 
 ## Measured effect
 
-| Held-out test | In-sample encoding | OOF, m=100 | OOF, m=20 |
+| Development holdout | In-sample encoding | OOF, m=100 | OOF, m=20 |
 |---|---|---|---|
 | Meta PR AUC | **0.8010** | 0.7837 | 0.7823 |
 | Meta ROC AUC | **0.9941** | 0.9914 | 0.9912 |
