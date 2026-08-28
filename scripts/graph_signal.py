@@ -26,7 +26,7 @@ def main():
     try:
         df = con.execute(
             f"SELECT is_fraud, {', '.join(GRAPH_FEATURES + REFERENCE_FEATURES)} "
-            "FROM fct_fraud_features WHERE dataset_split = 'test'").df()
+            "FROM fct_fraud_features WHERE evaluation_role = 'development_holdout'").df()
         density = con.execute("""
             SELECT COUNT(DISTINCT cc_num) AS cards,
                    COUNT(DISTINCT merchant) AS merchants,

@@ -1,6 +1,7 @@
 {#
-    Target encodings are computed out-of-fold and smoothed; see
-    macros/oof_target_encoding.sql for why.
+    Label-derived encodings and card statistics are strictly prior-only for every
+    training row. Scoring rows use frozen training-label maps. See
+    macros/temporal_target_encoding.sql and docs/target-encoding.md.
 #}
 {% set encodings = [
     ('category_risk', 'category'),
@@ -16,25 +17,28 @@ global_stats AS (
     SELECT AVG(is_fraud) AS global_rate FROM train_only
 ),
 
--- Deterministic fold assignment, stable across runs because it hashes the
--- transaction id rather than relying on row order.
-train_folded AS (
-    SELECT *, ABS(HASH(trans_num)) % 5 AS enc_fold FROM train_only
+settings AS (
+    SELECT CAST({{ var('target_encoding_cold_start_prior', 0.005) }} AS DOUBLE)
+        AS cold_start_prior
+),
+
+train_temporal AS (
+    SELECT
+        *,
+        SUM(is_fraud) OVER (
+            ORDER BY trans_date_trans_time, trans_num
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ) AS global_fraud_prior,
+        COUNT(*) OVER (
+            ORDER BY trans_date_trans_time, trans_num
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ) AS global_count_prior
+    FROM train_only
 ),
 
 {% for name, key_col in encodings %}
-{{ oof_encoding_cte(name, key_col) }},
+{{ temporal_encoding_cte(name, key_col) }},
 {% endfor %}
-
-card_rates AS (
-    SELECT
-        cc_num,
-        COUNT(*) AS card_txn_cnt,
-        AVG(amt) AS card_mean_amt,
-        COALESCE(STDDEV_SAMP(amt), 0.0) AS card_std_amt
-    FROM train_only
-    GROUP BY cc_num
-),
 
 unioned AS (
     SELECT *, 'train' AS dataset_split FROM {{ ref('stg_transactions_train') }}
@@ -42,9 +46,35 @@ unioned AS (
     SELECT *, 'test' AS dataset_split FROM {{ ref('stg_transactions_test') }}
 ),
 
+with_card_history AS (
+    SELECT
+        *,
+        -- A bounded 90-day history is causal and avoids the mechanical calendar-time
+        -- drift of lifetime counts. Same-timestamp peers are excluded.
+        COUNT(*) OVER (
+            PARTITION BY cc_num
+            ORDER BY trans_date_trans_time
+            RANGE BETWEEN INTERVAL '90 DAYS' PRECEDING
+                  AND INTERVAL '1 MICROSECOND' PRECEDING
+        ) AS card_txn_cnt,
+        AVG(amt) OVER (
+            PARTITION BY cc_num
+            ORDER BY trans_date_trans_time
+            RANGE BETWEEN INTERVAL '90 DAYS' PRECEDING
+                  AND INTERVAL '1 MICROSECOND' PRECEDING
+        ) AS card_mean_amt,
+        STDDEV_SAMP(amt) OVER (
+            PARTITION BY cc_num
+            ORDER BY trans_date_trans_time
+            RANGE BETWEEN INTERVAL '90 DAYS' PRECEDING
+                  AND INTERVAL '1 MICROSECOND' PRECEDING
+        ) AS card_std_amt
+    FROM unioned
+),
+
 joined AS (
     SELECT
-        u.*,
+        u.* EXCLUDE (card_txn_cnt, card_mean_amt, card_std_amt),
         COALESCE(cat.category_risk, g.global_rate) AS category_risk,
         COALESCE(st.state_risk,     g.global_rate) AS state_risk,
         COALESCE(mer.merchant_risk, g.global_rate) AS merchant_risk,
@@ -52,15 +82,14 @@ joined AS (
         COALESCE(cat.category_risk_serving, g.global_rate) AS category_risk_serving,
         COALESCE(st.state_risk_serving,     g.global_rate) AS state_risk_serving,
         COALESCE(mer.merchant_risk_serving, g.global_rate) AS merchant_risk_serving,
-        COALESCE(cr.card_txn_cnt, 0) AS card_txn_cnt,
-        COALESCE(cr.card_mean_amt, 0.0) AS card_mean_amt,
-        COALESCE(cr.card_std_amt, 0.0) AS card_std_amt
-    FROM unioned u
+        CAST(u.card_txn_cnt AS INTEGER) AS card_txn_cnt,
+        COALESCE(u.card_mean_amt, 0.0) AS card_mean_amt,
+        COALESCE(u.card_std_amt, 0.0) AS card_std_amt
+    FROM with_card_history u
     CROSS JOIN global_stats g
     LEFT JOIN category_risk_map cat ON u.trans_num = cat.trans_num
     LEFT JOIN state_risk_map    st  ON u.trans_num = st.trans_num
     LEFT JOIN merchant_risk_map mer ON u.trans_num = mer.trans_num
-    LEFT JOIN card_rates        cr  ON u.cc_num    = cr.cc_num
 )
 
 SELECT
@@ -115,12 +144,12 @@ SELECT
     card_mean_amt,
     card_std_amt,
     -- Relative amt features.
-    -- Cards with no prior history have card_mean_amt = card_std_amt = 0. Dividing by
-    -- an epsilon there produced z-scores in the billions, which were rendered into
-    -- the STR prompt as established fact. Emit the neutral value instead, and floor
-    -- the denominators at $1 so a genuinely low-variance card cannot blow up either.
+    -- A sample standard deviation is technically defined with two observations but
+    -- is too unstable to present as evidence at that support. Emit the neutral value
+    -- until five prior transactions exist, and floor the denominator at $1 for
+    -- genuinely low-variance cards.
     CASE
-        WHEN card_txn_cnt = 0 THEN 0.0
+        WHEN card_txn_cnt < 5 OR card_std_amt = 0 THEN 0.0
         ELSE (amt - card_mean_amt) / GREATEST(card_std_amt, 1.0)
     END AS amt_z_card,
     CASE

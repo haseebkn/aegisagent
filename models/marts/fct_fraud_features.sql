@@ -8,6 +8,14 @@ SELECT
     cc_num,
     trans_date_trans_time,
     dataset_split,
+    CASE
+        WHEN dataset_split = 'train' THEN 'model_development'
+        WHEN PERCENT_RANK() OVER (
+            PARTITION BY dataset_split
+            ORDER BY trans_date_trans_time, trans_num
+        ) < {{ var('development_holdout_fraction', 0.75) }} THEN 'development_holdout'
+        ELSE 'locked_evaluation'
+    END AS evaluation_role,
     is_fraud,
     -- Core features
     amt,

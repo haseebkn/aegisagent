@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0 — 2026-08-28
+
+Phase 1 makes the model-development and evaluation path temporal and auditable.
+
+- Replaced random-fold target encodings with smoothed prequential encodings built
+  exclusively from earlier labels.
+- Rebuilt card statistics over the strictly preceding 90 days and excluded the
+  current event from 24-hour and 7-day velocity.
+- Added a chronological development/locked-tail protocol with explicit unlock gates.
+- Added expanding-window ensemble validation, a simple logistic baseline, day-block
+  PR AUC confidence intervals, capacity/cost operating points, calibration, supported
+  subgroup/time slices, and local batch latency.
+- Added independent dbt reconstruction tests for target encodings and card history,
+  an evaluation-lock test, and explicit non-null history contracts.
+- Added committed machine-readable reports for development, the locked tail, rolling
+  validation, and feature drift.
+- Retrained artifacts on the causal mart. Development PR AUC is 0.7766; the locked
+  tail is 0.6711 and is disclosed as historically exposed at the aggregate level.
+
 ## 0.1.0 — 2026-08-27
 
 Phase 0 establishes an honest portfolio baseline.

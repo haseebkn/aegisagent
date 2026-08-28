@@ -10,6 +10,18 @@ models:
       - name: distance_km
         tests:
           - not_null
+      - name: evaluation_role
+        tests:
+          - not_null
+      - name: card_txn_cnt
+        tests:
+          - not_null
+      - name: card_mean_amt
+        tests:
+          - not_null
+      - name: card_std_amt
+        tests:
+          - not_null
       - name: txns_24h
         tests:
           - not_null

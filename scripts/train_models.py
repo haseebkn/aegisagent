@@ -6,12 +6,13 @@ Model-fitting split design (chronological, with no random row shuffling):
                      -> 15% blend   : fit the logistic meta-learner on base-model
                                       probabilities the base models have not seen
                      -> 15% calib   : select the demo decision threshold
-    fraudTest.csv    -> later development holdout used for iterative evaluation
+    fraudTest.csv    -> first 75% development holdout
+                     -> final 25% prospectively locked evaluation window
 
-Important: this is not end-to-end temporal isolation. Upstream random-fold target
-encodings and full-window card statistics expose later training-period information
-to earlier rows, and fraudTest.csv has informed feature decisions. The resulting
-metrics are development evidence, not final blind-test or pre-deployment estimates.
+All model features are prior-only for training rows. The final window is protected by
+an explicit unlock flag, but it is not historically pristine: earlier project versions
+reported aggregate metrics over all of fraudTest.csv. A truly external blind dataset
+is still required for an independent generalization claim.
 
 The threshold used to be chosen on the same rows the meta-learner was fitted on,
 which made it optimistically biased. The calib split exists solely to break that.
@@ -26,16 +27,13 @@ from datetime import datetime
 import duckdb
 import joblib
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (average_precision_score, classification_report,
                              confusion_matrix, precision_recall_curve,
                              precision_recall_fscore_support, roc_auc_score)
-from sklearn.preprocessing import StandardScaler
-from xgboost import XGBClassifier
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.config import ARTIFACTS_DIR, DB_PATH, FEAT_M2, FEAT_M3, FEAT_M4
+from scripts.config import ARTIFACTS_DIR, DB_PATH
+from scripts.modeling import fit_stacked_ensemble, score_base_models
 
 
 def chronological_split(df, fractions=(0.70, 0.15, 0.15)):
@@ -75,6 +73,10 @@ def main():
         "--keep", type=int, default=1,
         help="Version directories to retain after training (default 1: the one just "
              "trained). Raise it if you want previous versions available to roll back to.")
+    parser.add_argument(
+        "--unlock-final-evaluation", action="store_true",
+        help="Score the prospectively locked tail window. Run only after feature and "
+             "model decisions are frozen; the result will be written to model metrics.")
     args = parser.parse_args()
 
     print(f"Connecting to DuckDB at {DB_PATH}...")
@@ -84,11 +86,13 @@ def main():
     print(f"Total rows loaded: {len(df):,}")
 
     train_full_df = df[df['dataset_split'] == 'train'].copy()
-    test_df = df[df['dataset_split'] == 'test'].copy()
+    test_df = df[df['evaluation_role'] == 'development_holdout'].copy()
+    locked_df = df[df['evaluation_role'] == 'locked_evaluation'].copy()
 
     base_df, blend_df, calib_df = chronological_split(train_full_df)
     print(f"Chronological split -> base: {len(base_df):,} | blend: {len(blend_df):,} "
-          f"| calib: {len(calib_df):,} | development holdout: {len(test_df):,}")
+          f"| calib: {len(calib_df):,} | development holdout: {len(test_df):,} "
+          f"| prospectively locked: {len(locked_df):,}")
 
     y_base = base_df['is_fraud'].values
     y_blend = blend_df['is_fraud'].values
@@ -97,43 +101,16 @@ def main():
     print(f"Fraud counts -> base: {y_base.sum():,} | blend: {y_blend.sum():,} "
           f"| calib: {y_calib.sum():,} | test: {y_te.sum():,}")
 
-    # ---------------- MODEL 2: Random Forest (Geographic Focus) ----------------
-    print("\nTraining Model 2 (Geographic RF)...")
-    rf_geo = RandomForestClassifier(
-        n_estimators=400, max_depth=None, min_samples_leaf=2,
-        class_weight='balanced', n_jobs=-1, random_state=42)
-    rf_geo.fit(base_df[FEAT_M2].values, y_base)
-
-    # ---------------- MODEL 3: XGBoost (Category Risk Focus) ----------------
-    print("Training Model 3 (Category XGBoost)...")
-    ratio = (len(y_base) - y_base.sum()) / (y_base.sum() + 1e-6)
-    xgb = XGBClassifier(
-        n_estimators=1400, learning_rate=0.03, max_depth=7, min_child_weight=2,
-        subsample=0.9, colsample_bytree=0.85, gamma=0.3, reg_alpha=1.0,
-        reg_lambda=2.0, scale_pos_weight=ratio * 1.5, max_delta_step=2,
-        eval_metric='aucpr', n_jobs=-1, random_state=42)
-    xgb.fit(base_df[FEAT_M3].values, y_base)
-
-    # ---------------- MODEL 4: Random Forest (Velocity Focus) ----------------
-    print("Training Model 4 (Velocity RF with Scaling)...")
-    scaler = StandardScaler()
-    X4_base_sc = scaler.fit_transform(base_df[FEAT_M4].values)
-    rf_vel = RandomForestClassifier(
-        n_estimators=300, min_samples_leaf=5, class_weight='balanced_subsample',
-        n_jobs=-1, random_state=42)
-    rf_vel.fit(X4_base_sc, y_base)
+    print("\nTraining base learners and stacked meta-model...")
+    bundle = fit_stacked_ensemble(base_df, blend_df)
+    rf_geo = bundle["model_2"]
+    xgb = bundle["model_3"]
+    rf_vel = bundle["model_4"]
+    scaler = bundle["scaler_4"]
+    meta_model = bundle["meta_model"]
 
     def base_probs(frame):
-        p2 = rf_geo.predict_proba(frame[FEAT_M2].values)[:, 1]
-        p3 = xgb.predict_proba(frame[FEAT_M3].values)[:, 1]
-        p4 = rf_vel.predict_proba(scaler.transform(frame[FEAT_M4].values))[:, 1]
-        return p2, p3, p4
-
-    # ---------------- META-MODEL: fitted on the blend split ----------------
-    print("\nFitting stacked meta-model on the blend split...")
-    X_meta_blend = np.column_stack(base_probs(blend_df))
-    meta_model = LogisticRegression(max_iter=2000, random_state=42, n_jobs=-1)
-    meta_model.fit(X_meta_blend, y_blend)
+        return score_base_models(frame, bundle)
 
     # ------- THRESHOLD: selected on calib, which the meta-model has never seen -------
     print("Selecting decision threshold on the held-out calibration split...")
@@ -177,6 +154,38 @@ def main():
           f"({alerts / days:.1f}/day) at {te_prec:.1%} precision, "
           f"catching {int(cm[1][1]):,} of {int(y_te.sum()):,} frauds.")
 
+    locked_metrics = None
+    if args.unlock_final_evaluation:
+        print("\nUnlocking the prospectively held evaluation window exactly once for this run...")
+        locked_y = locked_df["is_fraud"].to_numpy()
+        locked_p2, locked_p3, locked_p4 = base_probs(locked_df)
+        locked_meta = meta_model.predict_proba(
+            np.column_stack([locked_p2, locked_p3, locked_p4]))[:, 1]
+        locked_pred = locked_meta >= best_thresh
+        locked_prec, locked_rec, locked_f1, _ = precision_recall_fscore_support(
+            locked_y, locked_pred, average="binary", zero_division=0)
+        locked_days = max((locked_df["trans_date_trans_time"].max()
+                           - locked_df["trans_date_trans_time"].min()).days, 1)
+        locked_metrics = {
+            "rows": len(locked_df),
+            "positives": int(locked_y.sum()),
+            "start": str(locked_df["trans_date_trans_time"].min()),
+            "end": str(locked_df["trans_date_trans_time"].max()),
+            "pr_auc": float(average_precision_score(locked_y, locked_meta)),
+            "roc_auc": float(roc_auc_score(locked_y, locked_meta)),
+            "precision": float(locked_prec),
+            "recall": float(locked_rec),
+            "f1": float(locked_f1),
+            "alerts": int(locked_pred.sum()),
+            "alerts_per_day": round(float(locked_pred.sum()) / locked_days, 2),
+            "historical_caveat": (
+                "Prospectively locked at Phase 1, but this public dataset had been "
+                "evaluated in aggregate before the lock; not a pristine external test."
+            ),
+        }
+        print(f"Locked window PR AUC={locked_metrics['pr_auc']:.4f}, "
+              f"precision={locked_prec:.1%}, recall={locked_rec:.1%}")
+
     # ---------------- PERSIST ARTIFACTS ----------------
     version_str = f"v_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     versioned_dir = ARTIFACTS_DIR / version_str
@@ -194,7 +203,16 @@ def main():
         "trained_at": datetime.now().isoformat(),
         "version": version_str,
         "split_rows": {"base": len(base_df), "blend": len(blend_df),
-                       "calib": len(calib_df), "test": len(test_df)},
+                       "calib": len(calib_df), "development_holdout": len(test_df),
+                       "locked_evaluation": len(locked_df)},
+        "feature_semantics": "causal_prior_only_90d_v1",
+        "evaluation_protocol": {
+            "development_role": "development_holdout",
+            "locked_role": "locked_evaluation",
+            "locked_fraction": 0.25,
+            "locked_scored": bool(args.unlock_final_evaluation),
+            "historically_pristine": False,
+        },
         "threshold_selected_on": "calib (held out from both base and blend fits)",
         "optimal_threshold": best_thresh,
         "calib_f1": calib_f1,
@@ -209,6 +227,17 @@ def main():
         "test_f1": float(te_f1),
         "test_alerts": alerts,
         "test_alerts_per_day": round(alerts / days, 2),
+        "development_pr_auc_meta": float(average_precision_score(y_te, meta_probs)),
+        "development_auc_m2": float(roc_auc_score(y_te, te_p2)),
+        "development_auc_m3": float(roc_auc_score(y_te, te_p3)),
+        "development_auc_m4": float(roc_auc_score(y_te, te_p4)),
+        "development_auc_meta": float(roc_auc_score(y_te, meta_probs)),
+        "development_precision": float(te_prec),
+        "development_recall": float(te_rec),
+        "development_f1": float(te_f1),
+        "development_alerts": alerts,
+        "development_alerts_per_day": round(alerts / days, 2),
+        "locked_evaluation": locked_metrics,
         "confusion_matrix": cm.tolist(),
         "meta_coefficients": {
             "model_2_geo": float(meta_model.coef_[0][0]),

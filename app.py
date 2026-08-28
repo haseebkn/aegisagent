@@ -243,7 +243,7 @@ def get_db_transactions():
             t.dob
         FROM fct_fraud_features f
         LEFT JOIN stg_transactions_test t ON f.trans_num = t.trans_num
-        WHERE f.dataset_split = 'test'
+        WHERE f.evaluation_role = 'development_holdout'
         LIMIT 200
     """
     df = con.execute(query).df()
@@ -344,24 +344,25 @@ if telemetry:
     st.sidebar.caption(f"Selected on: {telemetry.get('threshold_selected_on', 'n/a')}")
 
     st.sidebar.markdown("**Development-holdout performance**")
-    st.sidebar.write(f"- PR AUC: `{telemetry.get('test_pr_auc_meta', 0.0):.4f}`")
-    st.sidebar.write(f"- ROC AUC: `{telemetry.get('test_auc_meta', 0.0):.4f}`")
-    st.sidebar.write(f"- Precision: `{telemetry.get('test_precision', 0.0):.2%}`")
-    st.sidebar.write(f"- Recall: `{telemetry.get('test_recall', 0.0):.2%}`")
+    st.sidebar.write(f"- PR AUC: `{telemetry.get('development_pr_auc_meta', telemetry.get('test_pr_auc_meta', 0.0)):.4f}`")
+    st.sidebar.write(f"- ROC AUC: `{telemetry.get('development_auc_meta', telemetry.get('test_auc_meta', 0.0)):.4f}`")
+    st.sidebar.write(f"- Precision: `{telemetry.get('development_precision', telemetry.get('test_precision', 0.0)):.2%}`")
+    st.sidebar.write(f"- Recall: `{telemetry.get('development_recall', telemetry.get('test_recall', 0.0)):.2%}`")
     st.sidebar.caption(
-        "PR AUC is the headline metric here: at ~0.6% fraud prevalence, ROC AUC "
+        "PR AUC is the headline metric here: at ~0.4% fraud prevalence, ROC AUC "
         "flatters every model."
     )
 
-    if telemetry.get('test_alerts'):
+    development_alerts = telemetry.get('development_alerts', telemetry.get('test_alerts'))
+    if development_alerts:
         st.sidebar.markdown("**Operational load**")
-        st.sidebar.write(f"- Alerts: `{telemetry['test_alerts']:,}`")
-        st.sidebar.write(f"- Per day: `{telemetry.get('test_alerts_per_day', 0)}`")
+        st.sidebar.write(f"- Alerts: `{development_alerts:,}`")
+        st.sidebar.write(f"- Per day: `{telemetry.get('development_alerts_per_day', telemetry.get('test_alerts_per_day', 0))}`")
 
-    with st.sidebar.expander("Base Model Performance (Test ROC AUC)"):
-        st.sidebar.write(f"- Model 2 (Geo): `{telemetry.get('test_auc_m2', 0.0):.4f}`")
-        st.sidebar.write(f"- Model 3 (Cat): `{telemetry.get('test_auc_m3', 0.0):.4f}`")
-        st.sidebar.write(f"- Model 4 (Vel): `{telemetry.get('test_auc_m4', 0.0):.4f}`")
+    with st.sidebar.expander("Base Model Performance (Development ROC AUC)"):
+        st.sidebar.write(f"- Model 2 (Geo): `{telemetry.get('development_auc_m2', telemetry.get('test_auc_m2', 0.0)):.4f}`")
+        st.sidebar.write(f"- Model 3 (Cat): `{telemetry.get('development_auc_m3', telemetry.get('test_auc_m3', 0.0)):.4f}`")
+        st.sidebar.write(f"- Model 4 (Vel): `{telemetry.get('development_auc_m4', telemetry.get('test_auc_m4', 0.0)):.4f}`")
 
 # 1. Metrics Layer (Displaying the 4 key values with clean icons)
 st.subheader("📊 Transaction Profile")

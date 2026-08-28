@@ -238,7 +238,7 @@ NARRATIVE:
     return file_path
 
 def _highest_risk_alert(sample_size):
-    """Score a slice of the real test split and return its riskiest ALERT.
+    """Score a slice of the development holdout and return its riskiest alert.
 
     The agent is always driven by genuine model output, and only ever reports on a
     transaction the model actually flagged -- there is no mode in which a narrative
@@ -257,7 +257,7 @@ def _highest_risk_alert(sample_size):
                    t.lat, t.long, t.merchant, t.category, t.merch_lat, t.merch_long, t.job
             FROM fct_fraud_features f
             LEFT JOIN stg_transactions_test t ON f.trans_num = t.trans_num
-            WHERE f.dataset_split = 'test'
+            WHERE f.evaluation_role = 'development_holdout'
             LIMIT {int(sample_size)}
         """).df()
     finally:

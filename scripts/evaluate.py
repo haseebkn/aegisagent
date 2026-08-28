@@ -1,57 +1,83 @@
-"""Threshold and cost analysis for the stacked ensemble.
+"""Decision-focused evaluation for the causal Phase 1 fraud pipeline.
 
-A fraud model should not be operated at "the F1-optimal threshold" by default. Its
-operating point must reflect what an investigations team can actually staff, given what a missed fraud
-costs and what an investigator hour costs. This script reports that trade-off
-explicitly, following the cost-sensitive framing in Bahnsen et al. (2016).
-
-Cost model per transaction:
-    false negative -> the fraud amount is lost
-    false positive -> a fixed investigation/customer-friction cost
-    true positive  -> investigation cost paid, but the amount is recovered
-    true negative  -> nothing
-
-Headline metric is PR AUC, not ROC AUC. At 0.39% prevalence a ROC AUC near 0.99
-says very little: the negative class is so large that a model can rank well and
-still bury the queue in false positives.
+Reports model comparisons, day-block bootstrap intervals, alert capacity and cost,
+calibration, time/subgroup slices, and batch scoring latency. The prospectively
+locked tail window requires an explicit unlock flag and is still disclosed as
+historically exposed at the aggregate dataset level.
 """
+
 import argparse
 import json
 import os
 import sys
+import time
 
 import duckdb
 import numpy as np
+import pandas as pd
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import ARTIFACTS_DIR, DB_PATH, resolve_model_dir
+from scripts.evaluation_utils import (calibration_summary,
+                                      day_block_bootstrap_pr_auc,
+                                      subgroup_metrics)
 from scripts.inference_engine import load_models, run_inference
 
-DEFAULT_INVESTIGATION_COST = 25.0   # analyst time + customer friction per alert
+
+DEFAULT_INVESTIGATION_COST = 25.0
+BASELINE_FEATURES = [
+    "log_amt", "distance_km", "night", "is_online", "txns_24h", "txns_7d"
+]
 
 
-def score_test_split():
-    con = duckdb.connect(str(DB_PATH))
+def load_windows(role):
+    con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
-        df = con.execute(
-            "SELECT * FROM fct_fraud_features WHERE dataset_split = 'test'").df()
+        train = con.execute("""
+            SELECT * FROM fct_fraud_features
+            WHERE dataset_split = 'train'
+            ORDER BY trans_date_trans_time, trans_num
+        """).df()
+        evaluation = con.execute("""
+            SELECT f.*, t.gender, t.category AS raw_category, t.state AS raw_state
+            FROM fct_fraud_features f
+            LEFT JOIN stg_transactions_test t USING (trans_num)
+            WHERE f.evaluation_role = ?
+            ORDER BY f.trans_date_trans_time, f.trans_num
+        """, [role]).df()
     finally:
         con.close()
+    if evaluation.empty:
+        raise ValueError(f"No rows found for evaluation_role={role!r}; rebuild dbt models.")
+    return train, evaluation
 
-    models = load_models(ARTIFACTS_DIR)
-    meta_p, p2, p3, p4, _ = run_inference(df, *models)
-    return df, meta_p, p2, p3, p4, models[-1]
+
+def score_models(frame):
+    meta, p2, p3, p4, _ = run_inference(frame, *load_models(ARTIFACTS_DIR))
+    return {"model_2": p2, "model_3": p3, "model_4": p4, "ensemble": meta}
 
 
-def cost_at(y, amounts, probs, threshold, investigation_cost):
-    pred = probs >= threshold
+def score_simple_baseline(train, evaluation):
+    base = train.iloc[:int(len(train) * 0.70)]
+    pipeline = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(class_weight="balanced", max_iter=1000, random_state=42),
+    )
+    pipeline.fit(base[BASELINE_FEATURES], base["is_fraud"])
+    return pipeline.predict_proba(evaluation[BASELINE_FEATURES])[:, 1]
+
+
+def cost_at(y, amounts, probabilities, threshold, investigation_cost):
+    pred = probabilities >= threshold
     tp = pred & (y == 1)
     fp = pred & (y == 0)
     fn = (~pred) & (y == 1)
-
     fraud_loss = float(amounts[fn].sum())
-    review_cost = float((tp.sum() + fp.sum()) * investigation_cost)
+    review_cost = float(pred.sum() * investigation_cost)
     return {
         "threshold": float(threshold),
         "alerts": int(pred.sum()),
@@ -67,112 +93,136 @@ def cost_at(y, amounts, probs, threshold, investigation_cost):
     }
 
 
+def benchmark_latency(frame, models, runs):
+    sample = frame.iloc[:min(len(frame), 5000)]
+    durations = []
+    for _ in range(runs):
+        start = time.perf_counter()
+        run_inference(sample, *models)
+        durations.append((time.perf_counter() - start) * 1000.0)
+    per_row = np.asarray(durations) / len(sample)
+    return {
+        "sample_rows": len(sample),
+        "runs": runs,
+        "batch_ms_p50": float(np.median(durations)),
+        "batch_ms_p95": float(np.quantile(durations, 0.95)),
+        "ms_per_row_p50": float(np.median(per_row)),
+        "environment": "local batch benchmark; not an online-service SLA",
+    }
+
+
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--investigation-cost', type=float,
-                        default=DEFAULT_INVESTIGATION_COST,
-                        help='Cost of reviewing one alert (analyst time + friction).')
-    parser.add_argument('--alert-budget', type=int, default=None,
-                        help='Max alerts per day the team can work; reports the '
-                             'threshold that fits it.')
-    parser.add_argument('--output', type=str, default=None,
-                        help='Write the report as JSON to this path.')
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--window", choices=["development_holdout", "locked_evaluation"],
+                        default="development_holdout")
+    parser.add_argument("--unlock-final-evaluation", action="store_true")
+    parser.add_argument("--investigation-cost", type=float,
+                        default=DEFAULT_INVESTIGATION_COST)
+    parser.add_argument("--alert-budget", type=int, default=10)
+    parser.add_argument("--bootstrap-samples", type=int, default=500)
+    parser.add_argument("--latency-runs", type=int, default=5)
+    parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
-    df, meta_p, p2, p3, p4, deployed_threshold = score_test_split()
-    y = df['is_fraud'].to_numpy()
-    amounts = df['amt'].to_numpy()
-    span_days = max((df['trans_date_trans_time'].max()
-                     - df['trans_date_trans_time'].min()).days, 1)
+    if args.window == "locked_evaluation" and not args.unlock_final_evaluation:
+        parser.error("locked_evaluation requires --unlock-final-evaluation")
 
-    print("=" * 74)
-    print("RANKING QUALITY (reused development holdout)")
-    print("=" * 74)
-    print(f"Transactions: {len(y):,}   Frauds: {int(y.sum()):,} "
-          f"({y.sum()/len(y):.3%} prevalence)   Span: {span_days} days")
-    print(f"Total fraud exposure: ${amounts[y == 1].sum():,.2f}\n")
+    train, frame = load_windows(args.window)
+    probabilities = score_models(frame)
+    probabilities["simple_logistic"] = score_simple_baseline(train, frame)
+    y = frame["is_fraud"].to_numpy()
+    amounts = frame["amt"].to_numpy()
+    timestamps = pd.to_datetime(frame["trans_date_trans_time"])
+    span_days = max((timestamps.max() - timestamps.min()).days, 1)
+    threshold = float((resolve_model_dir() / "meta_threshold.txt").read_text().strip())
 
-    for name, p in [("Model 2 (geographic RF)", p2), ("Model 3 (category XGB)", p3),
-                    ("Model 4 (velocity RF)", p4), ("Stacked meta-model", meta_p)]:
-        print(f"  {name:<26} PR AUC={average_precision_score(y, p):.4f}   "
-              f"ROC AUC={roc_auc_score(y, p):.4f}")
-    print("\n  PR AUC is the headline. At this prevalence ROC AUC flatters everything.")
+    print("=" * 84)
+    print(f"EVALUATION WINDOW: {args.window}  ({len(frame):,} rows; {int(y.sum()):,} frauds)")
+    if args.window == "locked_evaluation":
+        print("CAVEAT: prospectively locked in Phase 1, but historically exposed in aggregate.")
+    print("=" * 84)
 
-    # ---- Operating points across the threshold range ----
-    print("\n" + "=" * 74)
-    print(f"OPERATING POINTS  (investigation cost ${args.investigation_cost:.2f}/alert)")
-    print("=" * 74)
-    print(f"{'thresh':>7} {'alerts':>8} {'/day':>7} {'prec':>7} {'recall':>7} "
-          f"{'missed $':>13} {'review $':>11} {'total $':>13}")
-
-    grid = [0.05, 0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90, 0.95]
-    rows = [cost_at(y, amounts, meta_p, t, args.investigation_cost) for t in grid]
-    for r in rows:
-        print(f"{r['threshold']:>7.2f} {r['alerts']:>8,} {r['alerts']/span_days:>7.1f} "
-              f"{r['precision']:>7.1%} {r['recall']:>7.1%} "
-              f"{r['fraud_loss']:>13,.0f} {r['review_cost']:>11,.0f} "
-              f"{r['total_cost']:>13,.0f}")
-
-    # ---- Cost-minimising threshold, searched finely ----
-    fine = np.unique(np.quantile(meta_p, np.linspace(0.90, 0.9999, 400)))
-    fine_rows = [cost_at(y, amounts, meta_p, t, args.investigation_cost) for t in fine]
-    best = min(fine_rows, key=lambda r: r['total_cost'])
-    deployed = cost_at(y, amounts, meta_p, deployed_threshold, args.investigation_cost)
-
-    print("\n" + "=" * 74)
-    print("COST-MINIMISING vs CURRENT DEMO THRESHOLD")
-    print("=" * 74)
-    for label, r in [("Current demo (F1-optimal on calib)", deployed),
-                     ("Cost-minimising", best)]:
-        print(f"\n{label}: threshold={r['threshold']:.4f}")
-        print(f"  alerts={r['alerts']:,} ({r['alerts']/span_days:.1f}/day)  "
-              f"precision={r['precision']:.1%}  recall={r['recall']:.1%}")
-        print(f"  fraud lost=${r['fraud_loss']:,.0f}  review=${r['review_cost']:,.0f}  "
-              f"TOTAL=${r['total_cost']:,.0f}")
-
-    delta = deployed['total_cost'] - best['total_cost']
-    if abs(delta) > 1:
-        direction = "saves" if delta > 0 else "costs"
-        print(f"\n  Moving to the cost-minimising threshold {direction} "
-              f"${abs(delta):,.0f} over {span_days} days, and changes the queue by "
-              f"{best['alerts'] - deployed['alerts']:+,} alerts "
-              f"({(best['alerts'] - deployed['alerts'])/span_days:+.1f}/day).")
-
-    # ---- Threshold implied by an alert budget ----
-    budget_row = None
-    if args.alert_budget:
-        target = args.alert_budget * span_days
-        budget_row = min(fine_rows, key=lambda r: abs(r['alerts'] - target))
-        print("\n" + "=" * 74)
-        print(f"ALERT BUDGET: {args.alert_budget}/day ({target:,} over {span_days} days)")
-        print("=" * 74)
-        print(f"  threshold={budget_row['threshold']:.4f}  "
-              f"alerts={budget_row['alerts']:,} "
-              f"({budget_row['alerts']/span_days:.1f}/day)")
-        print(f"  precision={budget_row['precision']:.1%}  "
-              f"recall={budget_row['recall']:.1%}  "
-              f"frauds caught={budget_row['tp']:,}/{int(y.sum()):,}")
-        print(f"  fraud lost=${budget_row['fraud_loss']:,.0f}")
-
-    if args.output:
-        payload = {
-            "model_version": resolve_model_dir().name,
-            "span_days": span_days,
-            "prevalence": float(y.mean()),
-            "total_fraud_exposure": float(amounts[y == 1].sum()),
-            "investigation_cost": args.investigation_cost,
-            "pr_auc": {"m2": float(average_precision_score(y, p2)),
-                       "m3": float(average_precision_score(y, p3)),
-                       "m4": float(average_precision_score(y, p4)),
-                       "meta": float(average_precision_score(y, meta_p))},
-            "roc_auc": {"meta": float(roc_auc_score(y, meta_p))},
-            "operating_points": rows,
-            "deployed": deployed,
-            "cost_minimising": best,
-            "alert_budget": budget_row,
+    ranking = {}
+    for name, values in probabilities.items():
+        interval = day_block_bootstrap_pr_auc(
+            y, values, timestamps.to_numpy(), args.bootstrap_samples)
+        ranking[name] = {
+            "pr_auc": float(average_precision_score(y, values)),
+            "pr_auc_ci_95_day_block": list(interval),
+            "roc_auc": float(roc_auc_score(y, values)),
         }
-        with open(args.output, "w") as f:
-            json.dump(payload, f, indent=2)
+        print(f"{name:<20} PR AUC={ranking[name]['pr_auc']:.4f} "
+              f"95% CI [{interval[0]:.4f}, {interval[1]:.4f}]  "
+              f"ROC AUC={ranking[name]['roc_auc']:.4f}")
+
+    ensemble = probabilities["ensemble"]
+    current = cost_at(y, amounts, ensemble, threshold, args.investigation_cost)
+    candidate_thresholds = np.unique(np.quantile(ensemble, np.linspace(0.90, 0.9999, 400)))
+    candidates = [cost_at(y, amounts, ensemble, value, args.investigation_cost)
+                  for value in candidate_thresholds]
+    cost_minimising = min(candidates, key=lambda row: row["total_cost"])
+    target_alerts = args.alert_budget * span_days
+    budget = min(candidates, key=lambda row: abs(row["alerts"] - target_alerts))
+
+    print("\nOPERATING POINTS")
+    for label, row in [("current", current), ("cost-minimising", cost_minimising),
+                       (f"capacity {args.alert_budget}/day", budget)]:
+        print(f"{label:<22} threshold={row['threshold']:.4f} "
+              f"alerts/day={row['alerts']/span_days:.1f} precision={row['precision']:.1%} "
+              f"recall={row['recall']:.1%} total_cost=${row['total_cost']:,.0f}")
+
+    calibration = calibration_summary(y, ensemble)
+    alert_mask = ensemble >= threshold
+    alert_calibration = (calibration_summary(y[alert_mask], ensemble[alert_mask], bins=5)
+                         if alert_mask.any() else None)
+    print(f"\nCALIBRATION: Brier={calibration['brier']:.6f} "
+          f"ECE={calibration['ece']:.4f} MCE={calibration['mce']:.4f}")
+    if alert_mask.any():
+        print(f"Alert region: predicted={ensemble[alert_mask].mean():.3f}, "
+              f"observed={y[alert_mask].mean():.3f}, "
+              f"gap={ensemble[alert_mask].mean()-y[alert_mask].mean():+.3f}")
+
+    frame = frame.copy()
+    frame["amount_band"] = pd.qcut(frame["amt"], q=4, duplicates="drop").astype(str)
+    frame["calendar_month"] = timestamps.dt.to_period("M").astype(str)
+    subgroup = {
+        column: subgroup_metrics(frame, y, ensemble, threshold, column)
+        for column in ("gender", "raw_category", "amount_band", "calendar_month")
+    }
+    print("\nSUPPORTED SLICES (descriptive, not a fairness certification)")
+    for column, rows in subgroup.items():
+        recalls = [row["recall"] for row in rows]
+        if recalls:
+            print(f"{column:<18} groups={len(rows):>2} recall range "
+                  f"{min(recalls):.1%}..{max(recalls):.1%}")
+
+    models = load_models(ARTIFACTS_DIR)
+    latency = benchmark_latency(frame, models, args.latency_runs)
+    print(f"\nLOCAL BATCH LATENCY: p50={latency['batch_ms_p50']:.1f} ms for "
+          f"{latency['sample_rows']:,} rows ({latency['ms_per_row_p50']:.4f} ms/row)")
+
+    payload = {
+        "model_version": resolve_model_dir().name,
+        "evaluation_role": args.window,
+        "historically_pristine": False,
+        "rows": len(frame),
+        "positives": int(y.sum()),
+        "prevalence": float(y.mean()),
+        "span_days": span_days,
+        "ranking": ranking,
+        "operating_points": {
+            "current": current,
+            "cost_minimising": cost_minimising,
+            "alert_capacity": budget,
+        },
+        "calibration": calibration,
+        "alert_region_calibration": alert_calibration,
+        "subgroups": subgroup,
+        "latency": latency,
+    }
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
         print(f"\nReport written to {args.output}")
 
 

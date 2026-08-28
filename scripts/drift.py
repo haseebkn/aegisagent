@@ -35,7 +35,7 @@ MONITORED = sorted(set(FEAT_M2) | set(FEAT_M3) | set(FEAT_M4))
 PSI_MODERATE = 0.10
 PSI_SIGNIFICANT = 0.25
 
-# Target encodings are out-of-fold on training rows and full-training on scoring rows,
+# Target encodings are prequential on training rows and full-training on scoring rows,
 # so comparing those columns directly measures the encoding CONSTRUCTION rather than
 # the data -- it reads as MODERATE drift on the full dataset and SIGNIFICANT on a small
 # fixture, in both cases while the means agree to three decimals.
@@ -123,10 +123,11 @@ def compare(reference_df, current_df, features=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--reference', default='train',
-                        help="dataset_split used as the training reference.")
-    parser.add_argument('--current', default='test',
-                        help="dataset_split treated as the scoring window.")
+    roles = ['model_development', 'development_holdout', 'locked_evaluation']
+    parser.add_argument('--reference', choices=roles, default='model_development',
+                        help="evaluation_role used as the training reference.")
+    parser.add_argument('--current', choices=roles, default='development_holdout',
+                        help="evaluation_role treated as the scoring window.")
     parser.add_argument('--fail-on-significant', action='store_true',
                         help="Exit non-zero if any feature shows significant drift.")
     parser.add_argument('--output', default=None, help="Write JSON report here.")
@@ -138,15 +139,15 @@ def main():
         # the report reads naturally.
         cols = ", ".join(f"{SERVING_EQUIVALENT.get(f, f)} AS {f}" for f in MONITORED)
         ref = con.execute(
-            f"SELECT {cols} FROM fct_fraud_features WHERE dataset_split = '{args.reference}'").df()
+            f"SELECT {cols} FROM fct_fraud_features WHERE evaluation_role = '{args.reference}'").df()
         cur = con.execute(
-            f"SELECT {cols} FROM fct_fraud_features WHERE dataset_split = '{args.current}'").df()
+            f"SELECT {cols} FROM fct_fraud_features WHERE evaluation_role = '{args.current}'").df()
     except duckdb.BinderException as e:
         con.close()
         raise SystemExit(
             f"Missing serving-equivalent encoding columns: {e}\n"
             "Rebuild the mart with `dbt run --profiles-dir .` -- drift is measured on "
-            "<encoding>_serving, not on the out-of-fold column the model trains on."
+            "<encoding>_serving, not on the prequential column the model trains on."
         ) from e
     else:
         con.close()

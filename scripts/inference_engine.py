@@ -154,7 +154,7 @@ def main():
     con = duckdb.connect(str(DB_PATH))
     try:
         test_df = con.execute(
-            f"SELECT * FROM fct_fraud_features WHERE dataset_split = 'test' "
+            f"SELECT * FROM fct_fraud_features WHERE evaluation_role = 'development_holdout' "
             f"LIMIT {int(args.limit)}").df()
     finally:
         con.close()

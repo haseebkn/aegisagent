@@ -92,7 +92,7 @@ def _load_scored_test_sample(limit=10000):
                    t.lat, t.long, t.merchant, t.category, t.merch_lat, t.merch_long, t.job
             FROM fct_fraud_features f
             LEFT JOIN stg_transactions_test t ON f.trans_num = t.trans_num
-            WHERE f.dataset_split = 'test'
+            WHERE f.evaluation_role = 'development_holdout'
             LIMIT {limit}
         """).df()
     finally:

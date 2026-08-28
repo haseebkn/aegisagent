@@ -1,0 +1,40 @@
+{
+  "folds": [
+    {
+      "fold": 1,
+      "train_end": "2019-10-03 07:35:11",
+      "validation_start": "2019-10-03 07:35:47",
+      "validation_end": "2019-11-29 19:34:45",
+      "train_rows": 648337,
+      "validation_rows": 129667,
+      "validation_positives": 758,
+      "pr_auc": 0.765474055034957,
+      "roc_auc": 0.992011423001532
+    },
+    {
+      "fold": 2,
+      "train_end": "2019-12-28 17:18:24",
+      "validation_start": "2019-12-28 17:18:38",
+      "validation_end": "2020-03-06 07:14:37",
+      "train_rows": 907672,
+      "validation_rows": 129667,
+      "validation_positives": 847,
+      "pr_auc": 0.7214841228302897,
+      "roc_auc": 0.9904853005035077
+    },
+    {
+      "fold": 3,
+      "train_end": "2020-05-02 11:09:29",
+      "validation_start": "2020-05-02 11:10:22",
+      "validation_end": "2020-06-21 12:13:37",
+      "train_rows": 1167008,
+      "validation_rows": 129667,
+      "validation_positives": 832,
+      "pr_auc": 0.837316972645936,
+      "roc_auc": 0.9943789443713038
+    }
+  ],
+  "mean_pr_auc": 0.7747583835037276,
+  "min_pr_auc": 0.7214841228302897,
+  "fast_mode": true
+}

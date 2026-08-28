@@ -1,0 +1,264 @@
+{
+  "model_version": "v_20260828_002211",
+  "evaluation_role": "locked_evaluation",
+  "historically_pristine": false,
+  "rows": 138930,
+  "positives": 254,
+  "prevalence": 0.0018282588353847262,
+  "span_days": 30,
+  "ranking": {
+    "model_2": {
+      "pr_auc": 0.4968328639870898,
+      "pr_auc_ci_95_day_block": [
+        0.40123694910715096,
+        0.5846762563548692
+      ],
+      "roc_auc": 0.972611199549031
+    },
+    "model_3": {
+      "pr_auc": 0.5179232201042077,
+      "pr_auc_ci_95_day_block": [
+        0.4023951950684847,
+        0.6545070696645638
+      ],
+      "roc_auc": 0.9814596443349626
+    },
+    "model_4": {
+      "pr_auc": 0.6824731724490101,
+      "pr_auc_ci_95_day_block": [
+        0.6010413537363688,
+        0.7730621996416127
+      ],
+      "roc_auc": 0.9816009554247901
+    },
+    "ensemble": {
+      "pr_auc": 0.6710531226424947,
+      "pr_auc_ci_95_day_block": [
+        0.5847087449875551,
+        0.7630228754721423
+      ],
+      "roc_auc": 0.9881543973910296
+    },
+    "simple_logistic": {
+      "pr_auc": 0.1635645503338709,
+      "pr_auc_ci_95_day_block": [
+        0.08966071456400945,
+        0.2738962579977625
+      ],
+      "roc_auc": 0.874726803291329
+    }
+  },
+  "operating_points": {
+    "current": {
+      "threshold": 0.7867728201900389,
+      "alerts": 182,
+      "tp": 142,
+      "fp": 40,
+      "fn": 112,
+      "precision": 0.7802197802197802,
+      "recall": 0.5590551181102362,
+      "fraud_loss": 33770.09,
+      "review_cost": 4550.0,
+      "total_cost": 38320.09,
+      "amount_recovered": 105482.47
+    },
+    "cost_minimising": {
+      "threshold": 0.025101862609977807,
+      "alerts": 606,
+      "tp": 196,
+      "fp": 410,
+      "fn": 58,
+      "precision": 0.3234323432343234,
+      "recall": 0.7716535433070866,
+      "fraud_loss": 9794.78,
+      "review_cost": 15150.0,
+      "total_cost": 24944.78,
+      "amount_recovered": 129457.78
+    },
+    "alert_capacity": {
+      "threshold": 0.26794844410738305,
+      "alerts": 293,
+      "tp": 160,
+      "fp": 133,
+      "fn": 94,
+      "precision": 0.5460750853242321,
+      "recall": 0.6299212598425197,
+      "fraud_loss": 25610.73,
+      "review_cost": 7325.0,
+      "total_cost": 32935.729999999996,
+      "amount_recovered": 113641.83
+    }
+  },
+  "calibration": {
+    "brier": 0.0011217048396298228,
+    "ece": 0.0012455620877908846,
+    "mce": 0.5283630984604298
+  },
+  "alert_region_calibration": {
+    "brier": 0.1832010910234306,
+    "ece": 0.16958300218210456,
+    "mce": 0.2931095062493252
+  },
+  "subgroups": {
+    "gender": [
+      {
+        "group": "F",
+        "rows": 76195,
+        "positives": 121,
+        "alert_rate": 0.0009843165562044753,
+        "precision": 0.7466666666666667,
+        "recall": 0.4628099173553719
+      },
+      {
+        "group": "M",
+        "rows": 62735,
+        "positives": 133,
+        "alert_rate": 0.001705586992906671,
+        "precision": 0.8037383177570093,
+        "recall": 0.6466165413533834
+      }
+    ],
+    "raw_category": [
+      {
+        "group": "entertainment",
+        "rows": 10024,
+        "positives": 6,
+        "alert_rate": 0.00029928172386272945,
+        "precision": 0.6666666666666666,
+        "recall": 0.3333333333333333
+      },
+      {
+        "group": "food_dining",
+        "rows": 9541,
+        "positives": 6,
+        "alert_rate": 0.0,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      {
+        "group": "gas_transport",
+        "rows": 14169,
+        "positives": 23,
+        "alert_rate": 0.00014115322182228809,
+        "precision": 1.0,
+        "recall": 0.08695652173913043
+      },
+      {
+        "group": "grocery_pos",
+        "rows": 12972,
+        "positives": 51,
+        "alert_rate": 0.0027752081406105457,
+        "precision": 0.9722222222222222,
+        "recall": 0.6862745098039216
+      },
+      {
+        "group": "health_fitness",
+        "rows": 9215,
+        "positives": 6,
+        "alert_rate": 0.00010851871947911015,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      {
+        "group": "home",
+        "rows": 13237,
+        "positives": 16,
+        "alert_rate": 0.00015109163707788774,
+        "precision": 1.0,
+        "recall": 0.125
+      },
+      {
+        "group": "kids_pets",
+        "rows": 12153,
+        "positives": 6,
+        "alert_rate": 0.0,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      {
+        "group": "misc_net",
+        "rows": 6776,
+        "positives": 28,
+        "alert_rate": 0.004132231404958678,
+        "precision": 0.8214285714285714,
+        "recall": 0.8214285714285714
+      },
+      {
+        "group": "misc_pos",
+        "rows": 8681,
+        "positives": 5,
+        "alert_rate": 0.0,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      {
+        "group": "personal_care",
+        "rows": 9951,
+        "positives": 7,
+        "alert_rate": 0.0,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      {
+        "group": "shopping_net",
+        "rows": 10403,
+        "positives": 60,
+        "alert_rate": 0.007017206575026435,
+        "precision": 0.726027397260274,
+        "recall": 0.8833333333333333
+      },
+      {
+        "group": "shopping_pos",
+        "rows": 12610,
+        "positives": 36,
+        "alert_rate": 0.0025376685170499604,
+        "precision": 0.78125,
+        "recall": 0.6944444444444444
+      }
+    ],
+    "amount_band": [
+      {
+        "group": "(0.999, 9.64]",
+        "rows": 34763,
+        "positives": 17,
+        "alert_rate": 0.0,
+        "precision": 0.0,
+        "recall": 0.0
+      },
+      {
+        "group": "(82.65, 22768.11]",
+        "rows": 34728,
+        "positives": 205,
+        "alert_rate": 0.005183137525915688,
+        "precision": 0.7777777777777778,
+        "recall": 0.6829268292682927
+      },
+      {
+        "group": "(9.64, 47.17]",
+        "rows": 34704,
+        "positives": 31,
+        "alert_rate": 5.763024435223605e-05,
+        "precision": 1.0,
+        "recall": 0.06451612903225806
+      }
+    ],
+    "calendar_month": [
+      {
+        "group": "2020-12",
+        "rows": 138930,
+        "positives": 254,
+        "alert_rate": 0.001310012236378032,
+        "precision": 0.7802197802197802,
+        "recall": 0.5590551181102362
+      }
+    ]
+  },
+  "latency": {
+    "sample_rows": 5000,
+    "runs": 5,
+    "batch_ms_p50": 457.2483999945689,
+    "batch_ms_p95": 545.2795400080504,
+    "ms_per_row_p50": 0.09144967999891378,
+    "environment": "local batch benchmark; not an online-service SLA"
+  }
+}

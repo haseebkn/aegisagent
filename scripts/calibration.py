@@ -74,13 +74,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--bins', type=int, default=10)
     parser.add_argument('--strategy', choices=['quantile', 'uniform'], default='quantile')
+    parser.add_argument('--window', choices=['development_holdout', 'locked_evaluation'],
+                        default='development_holdout')
+    parser.add_argument('--unlock-final-evaluation', action='store_true')
     parser.add_argument('--output', default=None)
     args = parser.parse_args()
+
+    if args.window == 'locked_evaluation' and not args.unlock_final_evaluation:
+        parser.error("locked_evaluation requires --unlock-final-evaluation")
 
     con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
         df = con.execute(
-            "SELECT * FROM fct_fraud_features WHERE dataset_split = 'test'").df()
+            "SELECT * FROM fct_fraud_features WHERE evaluation_role = ?",
+            [args.window]).df()
     finally:
         con.close()
 

@@ -1,126 +1,77 @@
-# Out-of-fold target encoding: correct, and slightly worse here
+# Causal target encoding and prior-only card history
 
-## What changed
+## Why out-of-fold was not enough
 
-`category_risk`, `state_risk` and `merchant_risk` were computed as `AVG(is_fraud)`
-per level over the whole training split, then applied back to those same training
-rows. Every row contributed to the encoding it was scored on.
+The Phase 0 pipeline replaced in-sample target encoding with deterministic random
+folds. That prevented a row's own label from entering its feature, but it was not
+causal: an early transaction still used labels from later dates in the other four
+folds. This made internal training and calibration evidence inconsistent with the
+chronological model split.
 
-They are now computed **out-of-fold with empirical-Bayes smoothing**
-(`macros/oof_target_encoding.sql`):
+Phase 1 replaces random folds with a **prequential encoding**. For each training row,
+category, state, and merchant histories end at the immediately preceding event:
 
-- A training row is encoded from the other four of five folds, so its own label never
-  reaches its own feature value. Folds are assigned by hashing `trans_num`, so they
-  are stable across runs and independent of row order.
-- `risk = (fraud_sum + m·global_rate) / (level_count + m)` shrinks thinly-observed
-  levels toward the prior.
-- Test rows use full training statistics, which is correct — no test label is
-  involved.
-- Unseen levels fall back to the global rate. Previously they fell back to `0.0`,
-  which made a novel merchant look maximally *safe*.
+```text
+risk = (prior_level_fraud + m × prior_global_rate)
+       / (prior_level_count + m)
+```
 
-## Measured effect
+Both the level statistics and the global prior use earlier labels only. `trans_num`
+is a deterministic tie-breaker. Before any label history exists, the configurable
+cold-start prior is 0.005. Scoring rows use maps frozen from the complete training
+period; scoring labels never update them.
 
-| Development holdout | In-sample encoding | OOF, m=100 | OOF, m=20 |
-|---|---|---|---|
-| Meta PR AUC | **0.8010** | 0.7837 | 0.7823 |
-| Meta ROC AUC | **0.9941** | 0.9914 | 0.9912 |
-| Recall | **69.79%** | 69.23% | 67.93% |
-| Precision | 84.82% | 84.71% | **85.91%** |
-| Frauds caught | **1,497** | 1,485 | 1,457 |
+Implementation: [macros/temporal_target_encoding.sql](../macros/temporal_target_encoding.sql).
 
-The methodologically correct construction is **~2.3% worse on PR AUC**.
+## Card-history features
 
-## Why the "fix" costs performance
+`card_txn_cnt`, `card_mean_amt`, and `card_std_amt` now use transactions from the
+strictly preceding 90 days. The bounded window matters for two reasons:
 
-This is worth being precise about, because the instinct is that removing leakage
-should improve generalisation.
+1. It excludes the current transaction and all future activity.
+2. It prevents a lifetime count from growing mechanically with calendar time.
 
-**There was very little leakage to remove.** Every encoded level is densely observed
-— the least-frequent merchant has 727 training rows, categories and states far more.
-A single row contributes about 0.1% of its level's mean. The in-sample encoding was
-therefore almost identical to a leave-one-out encoding already.
+An initial cumulative implementation was causal but failed the drift gate:
+`card_txn_cnt` moved from a mean of 908.9 in training to 2,110.2 in development
+(PSI 4.98). The 90-day definition reduced that to 285.7 versus 330.2 (PSI 0.1705,
+moderate); card mean and standard deviation are stable.
 
-**Out-of-fold adds variance.** Splitting into five folds means the same merchant
-receives five different encodings across training rows — 2,868 distinct values for
-693 merchants. That variance is noise the model has to fit around, and here it costs
-more than the leakage it removes.
+Amount z-scores remain neutral until five prior transactions exist. Two observations
+are mathematically sufficient for a sample standard deviation but too unstable to
+present as meaningful investigation evidence.
 
-Smoothing is not the cause: m=100 shrinks a 727-row level by 12% and m=20 by 2.7%,
-and both land within 0.002 PR AUC of each other. `m` was set from level support, not
-searched against the test set.
+The 24-hour and 7-day velocity windows also end one microsecond before the current
+timestamp, so their minimum is zero rather than one.
 
-## What was shipped, and why
+## Serving-equivalent drift references
 
-**OOF is kept**, despite the lower number.
+Training rows receive their historical prequential encoding while scoring rows
+receive a frozen full-training map. Directly comparing those columns would measure
+construction differences. The mart therefore retains monitoring-only
+`*_risk_serving` columns: the value a training row would receive from the frozen map.
+All model feature lists explicitly exclude these columns.
 
-The in-sample encoding is only safe *because* this dataset happens to have dense
-levels. That is a property of the data, not of the code. On a real portfolio with a
-long tail of merchants — most seen a handful of times — in-sample encoding leaks
-heavily and fails exactly where fraud concentrates. Choosing the construction that
-is robust when level support is thin, and paying 2% on a dataset where support is
-uniformly thick, is the right trade.
+On the Phase 1 mart, the drift gate reports zero significant, one moderate, and 18
+stable features. The machine-readable result is in
+[reports/drift.json](../reports/drift.json).
 
-The comparison is recorded here rather than buried because the number moved the wrong
-way, and a reader comparing this README against an earlier one deserves the
-explanation.
+## Verification
 
-## Drift monitoring: measured on serving-equivalent columns
+The implementation is protected at three levels:
 
-Comparing the out-of-fold column on training rows against the full-training column on
-scoring rows measures the encoding *construction*, not the data. It read as MODERATE
-drift on the full dataset (PSI 0.16-0.20) and SIGNIFICANT on the CI fixture (PSI above
-5), in both cases while the means agreed to three decimals.
+- `assert_target_encodings_are_temporal.sql` independently reconstructs all three
+  training encodings from earlier labels and compares every value.
+- `assert_card_history_is_prior_only.sql` independently reconstructs the 90-day
+  prior count and verifies first-event velocity is zero.
+- `test_temporal_feature_contract.py` rejects random-fold hashes, current-row velocity,
+  or removal of the explicit temporal window contracts.
 
-The first attempt at a fix excluded these three features from the drift gate. That was
-wrong: `merchant_risk` and `category_risk` are two of the model's strongest inputs
-(ROC AUC 0.72 each, behind only `amt`), so excluding them meant a broken encoding join
-could never fail the gate. A monitor that cannot fail on its most important features
-invites trust it has not earned.
+The full mart passes all 15 dbt tests over 1,852,394 rows.
 
-The mart therefore emits a **serving-equivalent** column per encoding —
-`category_risk_serving`, `state_risk_serving`, `merchant_risk_serving` — holding the
-value each row would receive at scoring time. `scripts/drift.py` measures on those.
-The comparison is apples-to-apples, all 19 monitored features stay under the gate, and
-no exclusion list is needed.
+## Evaluation consequence
 
-| | Before | After |
-|---|---|---|
-| Full dataset | 0 significant, **2 moderate** | **0 significant, 0 moderate, 19 stable** |
-| CI fixture | **3 significant** (excluded from gate) | **0 significant, 0 moderate, 19 stable** |
-| Features under the gate | 16 of 19 | **19 of 19** |
-
-Models still train on the out-of-fold column; the serving columns are never a model
-input, and `test_serving_equivalent_encodings_are_not_model_inputs` enforces that. On a
-training row the serving value is computed from statistics that include that row, so
-feeding it to a model would reintroduce exactly the leakage out-of-fold encoding exists
-to remove.
-
-**Verified to still catch a real break.** Simulating a failed encoding join — every
-scoring row collapsing to the global fraud rate — leaves the mean *unchanged* at
-0.005791, so any mean-ratio check passes it. PSI flags it at 12.43, SIGNIFICANT.
-
-### A note on the reference window
-
-Train-versus-test is an artifact of this project having two static splits. In a real
-deployment the reference is a rolling window of recent scored traffic compared against
-the current one; both sides are serving-equivalent by definition and the mismatch never
-arises. The serving columns make the static-split comparison behave the way a rolling
-one naturally would.
-
-## Related
-
-The graph features in [graph-features.md](graph-features.md) failed for the
-neighbouring reason: a label-derived feature that looked strong in training because
-label history was informative there, and was not once it had to generalise. High
-level support is what separates the two outcomes — dense levels make in-sample
-encoding nearly harmless, while a card-level constant derived from labels is not
-dense in any useful sense.
-
-## Not addressed
-
-`card_txn_cnt`, `card_mean_amt` and `card_std_amt` are still full-window training
-aggregates applied to training rows. They are **not** label-derived, so they cannot
-leak the target, but they do let a training row see its own card's future spend. A
-strictly causal version would compute them over a trailing window per row, as the
-velocity features already do.
+After causal reconstruction and bounded card history, the final ensemble achieves
+PR AUC 0.7766 on the development window and 0.6711 on the prospectively locked tail.
+The gap is disclosed rather than averaged away. The locked tail is not historically
+pristine because older project revisions reported aggregate metrics over the entire
+public test file; a genuinely external dataset is still required.

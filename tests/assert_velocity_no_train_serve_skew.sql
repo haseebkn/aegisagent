@@ -1,5 +1,5 @@
 -- Regression guard for the train/serve skew that zeroed the velocity features on
--- the test split. A distribution that differs by more than 2x between splits, or
+-- the development holdout. A distribution that differs by more than 2x, or
 -- a split where the feature is almost always zero while the other is not, means
 -- the feature is not being computed the same way at training and scoring time.
 --
