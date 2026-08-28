@@ -41,14 +41,15 @@ receipt, amendment, or regulatory record management.
 - **Narrative draft:** unapproved text generated from an alert for human review.
 - **RGS determination:** a decision belonging to the reporting entity's authorized
   human process; never a model output.
-- **Case history:** the local SQLite event stream for alert creation, assignment, and
-  disposition. It is append-only through this application's API but is not a
-  tamper-evident or regulated record archive.
+- **Case history:** the local SQLite event stream for alert creation, assignment,
+  evidence attachment, and disposition. It is append-only through this application's
+  API and hash-verifiable, but not independently anchored or a regulated record archive.
 - **STR:** a report prepared and submitted through an authorized FINTRAC reporting
   workflow. AegisAgent does not create or submit one.
-- **Archive attempt:** the current code can attempt to copy a draft to S3. It does not
-  return a durable receipt and currently fails open; it must not be described as a
-  verified compliance archive.
+- **Evidence receipt:** every local artifact records a SHA-256 and byte size. When S3
+  is configured, remote archival is marked verified only if S3 returns the requested
+  checksum and a VersionId. That receipt establishes what this application observed;
+  it does not establish retention-policy suitability or regulatory compliance.
 
 ## Data and privacy boundary
 

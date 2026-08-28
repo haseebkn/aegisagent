@@ -33,8 +33,8 @@ it is not evidence that an STR was prepared or transmitted.
 - Only the `authorized_rgs_reviewer` role can record `rgs_reached` or
   `rgs_not_reached`.
 - Both dispositions are terminal and cannot be silently rewritten.
-- Every transition appends an event containing actor, asserted role, rationale,
-  timestamp, previous/new state, and monotonic case version.
+- Every transition appends a hash-chained event containing actor, asserted role,
+  rationale, timestamp, previous/new state, and monotonic case version.
 - An expected-version check prevents a stale browser or CLI invocation from
   overwriting a newer transition.
 
@@ -62,11 +62,12 @@ python scripts/case_cli.py show CASE-ID
 This is workflow logic, not a production case-management control. Reviewer identity
 and role are self-attested inputs; there is no login, directory integration, RBAC,
 maker-checker policy, or cryptographic signature. SQLite provides transactional local
-persistence, but the application event API is only logically append-only—the file is
-not tamper-evident, replicated, backed up, retention-managed, or independently
-reconciled. Narrative/quarantine files are not yet linked into the case event stream.
+persistence, but the application event API is only logically append-only. Phase 3
+adds local hash-chain and evidence-file verification plus optional versioned S3
+receipts; neither is an independent trust anchor. The local database is not
+replicated, backed up, retention-managed, or independently reconciled.
 
-Those are durable-evidence and security concerns for later phases. The Phase 2 claim
-is narrower: the software now makes the human decision boundary explicit, rejects
+Those are security and operational-resilience concerns for later phases. The Phase 2
+claim remains narrower: the software makes the human decision boundary explicit, rejects
 invalid or unauthorized transitions, records who asserted each decision and why, and
 never turns that decision into an automatic regulatory filing.

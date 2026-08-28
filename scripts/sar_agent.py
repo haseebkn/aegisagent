@@ -7,7 +7,9 @@ from datetime import datetime
 import boto3
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.config import COMPLIANCE_LOGS_DIR
+from scripts.case_management import CaseStore, ReviewerRole
+from scripts.config import COMPLIANCE_LOGS_DIR, EVIDENCE_DIR
+from scripts.evidence import EvidenceStore
 from scripts.grounding import check_narrative, correction_prompt
 from scripts.inference_engine import NoAlertsInSample
 from scripts.pii import mask_name, mask_pan
@@ -155,43 +157,54 @@ Generate the 5W+H investigation narrative draft now. Use only the figures above.
             if attempt == max_retries:
                 return None
 
-def save_sar_report(txn, p_m2, p_m3, p_m4, meta_score, narrative, output_dir=None):
-    if output_dir is None:
-        output_dir = COMPLIANCE_LOGS_DIR
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 1. Factual grounding review.
-    #
-    # A narrative that fails is quarantined rather than discarded. Silently dropping
-    # it meant an alert that reached the drafting stage left no trace at all.
-    report = check_narrative(narrative, txn, p_m2, p_m3, p_m4, meta_score)
-    if not report.ok:
-        quarantine_dir = os.path.join(output_dir, "quarantine")
-        os.makedirs(quarantine_dir, exist_ok=True)
-        q_name = (f"QUARANTINE_{txn.get('trans_num', 'unknown')}_"
-                  f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
-        q_path = os.path.join(quarantine_dir, q_name)
-        with open(q_path, "w", encoding="utf-8") as f:
-            f.write(
-                "REJECTED BY GROUNDING REVIEW\n"
-                f"{report.summary()}\n"
-                f"Transaction: {txn.get('trans_num', 'unknown')}\n"
-                f"Meta-score: {meta_score:.4f}\n"
-                f"{'=' * 70}\n{narrative}\n")
-        print(f"QUARANTINED: narrative held for review at {q_path}")
+def save_sar_report(
+    txn,
+    p_m2,
+    p_m3,
+    p_m4,
+    meta_score,
+    narrative,
+    output_dir=None,
+    *,
+    case_id,
+    actor,
+    actor_role,
+    expected_case_version,
+    case_store=None,
+    evidence_store=None,
+    s3_client=None,
+    archive_bucket=None,
+):
+    """Preserve and link a grounded draft (or quarantine evidence) to an active case."""
+    case_store = case_store or CaseStore()
+    case = case_store.get_case(case_id)
+    if case.trans_num != str(txn.get("trans_num", "")):
         raise ValueError(
-            f"Grounding review failed: {report.summary()} "
-            f"Narrative quarantined at {q_path} for manual review.")
+            f"Case {case_id} belongs to transaction {case.trans_num}, not "
+            f"{txn.get('trans_num', 'unknown')}"
+        )
+    if evidence_store is None:
+        evidence_root = EVIDENCE_DIR if output_dir is None else os.path.join(output_dir, "evidence")
+        evidence_store = EvidenceStore(evidence_root)
+    report = check_narrative(narrative, txn, p_m2, p_m3, p_m4, meta_score)
+    trans_num = txn.get("trans_num", "unknown")
+    generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
 
-
-    trans_num = txn.get('trans_num', 'unknown')
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_name = f"STR_DRAFT_{trans_num}_{timestamp}.txt"
-    file_path = os.path.join(output_dir, file_name)
-    
-    report_content = f"""======================================================================
+    if not report.ok:
+        evidence_type = "narrative_quarantine"
+        report_content = (
+            "REJECTED BY GROUNDING REVIEW\n"
+            f"Preserved for human review: {generated_at}\n"
+            f"{report.summary()}\n"
+            f"Transaction: {trans_num}\n"
+            f"Meta-score: {meta_score:.4f}\n"
+            f"{'=' * 70}\n{narrative}\n"
+        )
+    else:
+        evidence_type = "narrative_draft"
+        report_content = f"""======================================================================
 INVESTIGATION NARRATIVE DRAFT -- NOT A FINTRAC FILING
-Generated for human review: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Generated for human review: {generated_at}
 Status: DRAFT / NOT APPROVED / NOT SUBMITTED
 ======================================================================
 METADATA:
@@ -215,27 +228,39 @@ NARRATIVE:
 {narrative}
 ======================================================================
 """
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(report_content)
-        
-    print(f"Investigation narrative draft written to: {file_path}")
-
-    # S3 Upload logic
-    s3_bucket = os.environ.get("COMPLIANCE_S3_BUCKET")
-    if s3_bucket:
-        print(f"COMPLIANCE_S3_BUCKET is configured. Uploading draft to S3 bucket: {s3_bucket}...")
-        try:
-            s3_client = boto3.client('s3')
-            s3_client.put_object(
-                Bucket=s3_bucket,
-                Key=file_name,
-                Body=report_content.encode('utf-8')
-            )
-            print(f"SUCCESS: Draft uploaded to S3 bucket '{s3_bucket}' with key '{file_name}'.")
-        except Exception as e:
-            print(f"ERROR: Failed to upload draft to S3: {e}")
-            
-    return file_path
+    s3_bucket = os.environ.get("COMPLIANCE_S3_BUCKET") if archive_bucket is None else archive_bucket
+    receipt = evidence_store.preserve_text(
+        case_id=case_id,
+        evidence_type=evidence_type,
+        content=report_content,
+        archive_bucket=s3_bucket,
+        s3_client=s3_client,
+    )
+    case_store.attach_evidence(
+        case_id,
+        receipt=receipt,
+        actor=actor,
+        actor_role=actor_role,
+        expected_version=expected_case_version,
+    )
+    archive = receipt.archive_receipt
+    if archive and archive.get("verified"):
+        print(
+            f"VERIFIED ARCHIVE: s3://{archive['bucket']}/{archive['key']} "
+            f"version={archive['version_id']} checksum={receipt.sha256}"
+        )
+    elif archive:
+        print(f"UNVERIFIED ARCHIVE ATTEMPT: {archive['error_type']}: {archive['error']}")
+    print(
+        f"Evidence {receipt.evidence_id} linked to {case_id}: {receipt.local_path} "
+        f"sha256={receipt.sha256}"
+    )
+    if not report.ok:
+        raise ValueError(
+            f"Grounding review failed: {report.summary()} Narrative preserved as "
+            f"evidence {receipt.evidence_id} at {receipt.local_path}."
+        )
+    return receipt.local_path
 
 def _highest_risk_alert(sample_size):
     """Score a slice of the development holdout and return its riskiest alert.
@@ -277,6 +302,11 @@ def main():
                              'At 0.39%% prevalence a few hundred rows usually contain no '
                              'alert at all.')
     parser.add_argument('--output-dir', type=str, default=str(COMPLIANCE_LOGS_DIR))
+    parser.add_argument('--case-id', required=True,
+                        help='Existing under-review case for the selected alert.')
+    parser.add_argument('--actor', required=True, help='Identified reviewer preserving evidence.')
+    parser.add_argument('--role', choices=[role.value for role in ReviewerRole], required=True)
+    parser.add_argument('--expected-case-version', type=int, required=True)
     args = parser.parse_args()
 
     print("=== INVESTIGATION NARRATIVE DRAFTING ASSISTANT ===")
@@ -302,7 +332,19 @@ def main():
     print("=" * 60)
 
     try:
-        save_sar_report(txn, p_m2, p_m3, p_m4, meta_score, narrative, args.output_dir)
+        save_sar_report(
+            txn,
+            p_m2,
+            p_m3,
+            p_m4,
+            meta_score,
+            narrative,
+            args.output_dir,
+            case_id=args.case_id,
+            actor=args.actor,
+            actor_role=args.role,
+            expected_case_version=args.expected_case_version,
+        )
     except ValueError as e:
         print(f"DRAFT_VALIDATION_ERROR: {e}")
 

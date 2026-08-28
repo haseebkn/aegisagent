@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 import duckdb
 import numpy as np
@@ -17,6 +18,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from scripts.config import ARTIFACTS_DIR, DB_PATH, PROJECT_ROOT
+from scripts.case_management import CaseStore, ReviewerRole
+from scripts.evidence import EvidenceStore
 from scripts.inference_engine import (NoAlertsInSample, load_models, run_inference,
                                       select_highest_risk_alert)
 from scripts.sar_agent import generate_sar_narrative, save_sar_report
@@ -173,15 +176,50 @@ def verify_sar_agent():
     print("No unmasked PAN detected in narrative.")
 
     try:
-        file_path = save_sar_report(
-            txn, float(p_m2[idx]), float(p_m3[idx]), float(p_m4[idx]), meta_score, narrative)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            case_store = CaseStore(os.path.join(temp_dir, "cases.sqlite3"))
+            case = case_store.create_alert_case(
+                trans_num=txn["trans_num"],
+                model_score=meta_score,
+                threshold=float(load_models(ARTIFACTS_DIR)[-1]),
+                model_version="pipeline-verification",
+                actor="pipeline-verifier",
+            )
+            case = case_store.start_review(
+                case.case_id,
+                actor="pipeline-verifier",
+                actor_role=ReviewerRole.INVESTIGATOR,
+                rationale="Temporary human-review case for end-to-end pipeline verification.",
+                expected_version=case.version,
+            )
+            file_path = save_sar_report(
+                txn,
+                float(p_m2[idx]),
+                float(p_m3[idx]),
+                float(p_m4[idx]),
+                meta_score,
+                narrative,
+                case_id=case.case_id,
+                actor="pipeline-verifier",
+                actor_role=ReviewerRole.INVESTIGATOR,
+                expected_case_version=case.version,
+                case_store=case_store,
+                evidence_store=EvidenceStore(os.path.join(temp_dir, "evidence")),
+                archive_bucket="",
+            )
+            integrity = case_store.verify_integrity(case.case_id)
+            if not integrity["ok"]:
+                print(f"ERROR: Evidence integrity verification failed: {integrity['issues']}")
+                return False
+            if os.path.exists(file_path):
+                print(
+                    f"Narrative evidence verified: {integrity['events_verified']} events, "
+                    f"{integrity['evidence_verified']} artifact, chain {integrity['chain_head']}"
+                )
+                return True
     except ValueError as e:
         print(f"DRAFT_VALIDATION_ERROR: {e}")
         return False
-
-    if os.path.exists(file_path):
-        print(f"Narrative draft verified: file exists at {file_path}")
-        return True
     return False
 
 

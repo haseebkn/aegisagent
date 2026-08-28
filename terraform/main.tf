@@ -44,12 +44,14 @@ variable "bedrock_profile_regions" {
 }
 
 # =====================================================================
-# AMAZON S3 COMPLIANCE DATA LAKE
+# AMAZON S3 VERSIONED EVIDENCE REFERENCE
 # =====================================================================
 resource "aws_s3_bucket" "compliance_lake" {
   bucket              = "${var.project_name}-compliance-logs-${data.aws_caller_identity.current.account_id}"
   force_destroy       = false
-  object_lock_enabled = true # CRITICAL: Required for FINTRAC WORM compliance
+  # Object Lock demonstrates immutable-object infrastructure. Retention suitability
+  # remains an institution-specific legal, records-management, and operational decision.
+  object_lock_enabled = true
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "crypto" {
@@ -80,11 +82,13 @@ resource "aws_s3_bucket_versioning" "compliance_lake_versioning" {
 # 2. Apply WORM (Write Once Read Many) Object Lock
 resource "aws_s3_bucket_object_lock_configuration" "compliance_lake_lock" {
   bucket = aws_s3_bucket.compliance_lake.id
+  depends_on = [aws_s3_bucket_versioning.compliance_lake_versioning]
 
   rule {
     default_retention {
-      mode = "COMPLIANCE" # Strictly prevents deletion/alteration, even by the root user
-      days = 1825         # 5 years
+      mode = "COMPLIANCE"
+      # Illustrative policy value; not a compliance determination.
+      days = 1825
     }
   }
 }
@@ -231,8 +235,9 @@ resource "aws_ecs_cluster" "cluster" {
 }
 
 resource "aws_cloudwatch_log_group" "logs" {
-  name              = "/ecs/${var.project_name}"
-  retention_in_days = 1827 # Updated from 7 days to 5 years (AWS uses 1827 for 5 yrs)
+  name = "/ecs/${var.project_name}"
+  # Illustrative operational retention; validate before deployment.
+  retention_in_days = 1827
 }
 
 resource "aws_ecs_task_definition" "pipeline_task" {
@@ -265,6 +270,8 @@ resource "aws_ecs_task_definition" "pipeline_task" {
       # load any model.
       { name = "MODELS_ARTIFACTS_DIR", value = "/app/models_artifacts" },
       { name = "COMPLIANCE_LOGS_DIR", value = "/app/compliance_logs" },
+      { name = "AEGIS_CASE_DB_PATH", value = "/app/compliance_logs/cases.sqlite3" },
+      { name = "AEGIS_EVIDENCE_DIR", value = "/app/compliance_logs/evidence" },
       { name = "AEGIS_RAW_DATA_DIR", value = "/app" },
       { name = "DBT_PROFILES_DIR", value = "/app" },
       { name = "COMPLIANCE_S3_BUCKET", value = aws_s3_bucket.compliance_lake.id },

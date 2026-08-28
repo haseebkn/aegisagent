@@ -20,6 +20,7 @@ DB_PATH = _resolve("DBT_DB_PATH", "aegis_db.duckdb")
 ARTIFACTS_DIR = _resolve("MODELS_ARTIFACTS_DIR", "models_artifacts")
 COMPLIANCE_LOGS_DIR = _resolve("COMPLIANCE_LOGS_DIR", "compliance_logs")
 CASE_DB_PATH = _resolve("AEGIS_CASE_DB_PATH", "compliance_logs/cases.sqlite3")
+EVIDENCE_DIR = _resolve("AEGIS_EVIDENCE_DIR", "compliance_logs/evidence")
 RAW_DATA_DIR = _resolve("AEGIS_RAW_DATA_DIR", ".")
 
 # Feature contracts. Imported by training, inference and the dashboard so the

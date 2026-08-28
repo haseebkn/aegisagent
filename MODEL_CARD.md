@@ -1,6 +1,6 @@
 # AegisAgent model card
 
-**Version:** 0.3.0
+**Version:** 0.4.0
 
 **Status:** portfolio/research baseline
 
@@ -118,15 +118,25 @@ some hallucinations but does not prove entailment or completeness. The project d
 not implement a complete FINTRAC form, reporting approval, submission, receipt
 tracking, or amendment workflow.
 
+Drafts and grounding-failure quarantines are preserved atomically as content-addressed
+case evidence. The case ledger records their SHA-256, byte size, location, and any S3
+version/checksum receipt. Hash-chain and file verification detects accidental edits,
+missing artifacts, broken links, and unverified archive attempts; it is not a digital
+signature or protection against a privileged actor rewriting both the database and
+the evidence.
+
 ## Privacy, security, and deployment limitations
 
 Names and PANs are masked before the Bedrock request, but location, occupation,
 gender, and other quasi-identifiers remain. The demo has no authentication or
 production RBAC: its reviewer identity and role are self-attested UI/CLI inputs. Its
-SQLite history is append-only through the application API, not tamper-evident or a
-compliant record archive. HTML rendering, encryption, backup, retention, access
-control, and archival behavior require hardening. It must use synthetic data only in
-its current state.
+SQLite history is append-only through the application API and hash-verifiable, but is
+not independently anchored or a compliant record archive. Local storage is not
+replicated or backed up. S3 archival is optional and is considered verified only when
+a checksum and VersionId are returned; the Terraform retention value is illustrative,
+not a compliance opinion. HTML rendering, encryption-key governance, recovery,
+retention approval, and access control require hardening. It must use synthetic data
+only in its current state.
 
 Nothing serves production traffic. Streamlit runs locally. The Docker image runs a
 verifier and exits. Terraform defines an AWS reference scaffold with an ECS desired

@@ -16,6 +16,7 @@ from scripts.case_management import (
     CaseStore,
     ReviewerRole,
     case_to_dict,
+    evidence_to_dict,
     event_to_dict,
 )
 
@@ -61,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     show = commands.add_parser("show", help="Show a case and its complete event history")
     show.add_argument("case_id")
 
+    verify = commands.add_parser("verify", help="Verify event-chain and local evidence integrity")
+    verify.add_argument("case_id")
+
     list_cmd = commands.add_parser("list", help="List cases, newest activity first")
     list_cmd.add_argument(
         "--status",
@@ -103,7 +107,16 @@ def main() -> None:
             result = {
                 "case": case_to_dict(store.get_case(args.case_id)),
                 "history": [event_to_dict(event) for event in store.history(args.case_id)],
+                "evidence": [
+                    evidence_to_dict(evidence) for evidence in store.list_evidence(args.case_id)
+                ],
+                "integrity": store.verify_integrity(args.case_id),
             }
+        elif args.command == "verify":
+            result = store.verify_integrity(args.case_id)
+            if not result["ok"]:
+                print(json.dumps(result, indent=2, sort_keys=True))
+                raise SystemExit(2)
         else:
             result = [case_to_dict(case) for case in store.list_cases(args.status)]
     except CaseManagementError as exc:

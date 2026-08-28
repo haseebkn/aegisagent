@@ -21,7 +21,8 @@ def test_dashboard_does_not_turn_alert_into_filing_requirement():
 
 def test_saved_artifact_is_explicitly_an_unsubmitted_draft():
     source = read("scripts/sar_agent.py")
-    assert 'file_name = f"STR_DRAFT_' in source
+    assert "EvidenceStore" in source
+    assert "attach_evidence" in source
     assert "INVESTIGATION NARRATIVE DRAFT -- NOT A FINTRAC FILING" in source
     assert "Status: DRAFT / NOT APPROVED / NOT SUBMITTED" in source
 

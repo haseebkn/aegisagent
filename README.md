@@ -86,7 +86,12 @@ Bedrock (Claude Haiku 4.5) with a 5W+H drafting prompt. A retry loop enforces
 narrative must trace to the payload, and claims about data the pipeline never
 supplied (prior transactions, travel times, device telemetry, linked accounts) are
 rejected. Narratives that still fail are quarantined for review rather than
-discarded. Passing drafts remain drafts: the project does not collect the complete
+discarded. Phase 3 atomically preserves both drafts and quarantines as content-addressed,
+SHA-256 evidence linked to the active case. Optional S3 archival is considered verified
+only when the response includes the requested checksum and an object VersionId; failed
+attempts remain visible and make integrity verification fail. See
+[docs/evidence-integrity.md](docs/evidence-integrity.md). Passing drafts remain drafts:
+the project does not collect the complete
 Schedule 1 data, implement approval, or submit anything to FINTRAC. Card numbers and
 names are masked before they leave the process, but other personal and location data
 remain in the prompt. The
@@ -119,8 +124,9 @@ streamlit run app.py
 ```
 
 Every path is env-overridable (`DBT_DB_PATH`, `MODELS_ARTIFACTS_DIR`,
-`COMPLIANCE_LOGS_DIR`, `AEGIS_CASE_DB_PATH`, `AEGIS_RAW_DATA_DIR`) and defaults to a
-location relative to the repo root — see `scripts/config.py`.
+`COMPLIANCE_LOGS_DIR`, `AEGIS_CASE_DB_PATH`, `AEGIS_EVIDENCE_DIR`,
+`AEGIS_RAW_DATA_DIR`) and defaults to a location relative to the repo root — see
+`scripts/config.py`.
 
 ### Verification container
 
@@ -154,6 +160,7 @@ Streamlit dashboard or expose a real-time scoring API.
 | `python scripts/calibration.py` | Brier, ECE/MCE and reliability, reported separately for the alerting region. |
 | `python scripts/graph_signal.py` | Bipartite graph density and univariate power of the entity features. |
 | `python scripts/case_cli.py --help` | Create, assign, disposition, list, and inspect human-review cases without the dashboard. |
+| `python scripts/case_cli.py verify CASE-ID` | Verify the case event chain, projection version, linked files, hashes, sizes, and remote receipt status. Exits 2 on failure. |
 
 ### Threshold selection is a business decision
 
@@ -211,7 +218,7 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 | Job | What it does |
 |---|---|
 | Lint | `ruff check` on correctness rules only (F, E9, W6). Exists because dead code accumulated twice, including a function renamed at its definition but not its call site — which no test could catch, since nothing imports it. |
-| Unit tests | 86 pytest cases over PII masking, grounding, alert gates, the human-review state machine, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, and path resolution. |
+| Unit tests | 101 pytest cases over PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, and path resolution. |
 | dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`), runs the **real** dbt models and data tests against it — no 500 MB download — then runs the drift gate. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
 | Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard: `.dockerignore` once excluded `models/`, `models_artifacts/` and the DuckDB file, and `docker-compose` bind-mounted the repo over `/app`, hiding it. |
@@ -258,12 +265,17 @@ Read this before drawing conclusions from the metrics above.
   the payload and a list of unsupported claim types is screened, but no claim-level
   entailment checking is done: a narrative can use only real figures and still draw
   an unsupported inference. Phase 2 requires an active human-review case before a
-  narrative can be drafted, but draft and quarantine files are not yet attached to
-  the case event history.
+  narrative can be drafted; Phase 3 preserves both passing drafts and grounding
+  failures in the case evidence history.
 - **Workflow roles are not authentication.** The dashboard and CLI enforce state and
   role rules, but identities and roles are self-attested. The SQLite history is
-  transactional and append-only through the application API, not tamper-evident,
-  access-controlled, backed up, or retention-managed.
+  transactional, hash-chained, and append-only through the application API. That
+  detects corruption but is not a signature or external trust anchor; local state is
+  not access-controlled, backed up, or retention-managed.
+- **A verified upload receipt is not a compliance opinion.** A matching S3 checksum
+  and VersionId establish the remote object observed by this process. The project does
+  not continuously reconcile or restore-test the bucket, and its Terraform retention
+  value is illustrative rather than institution-approved.
 - **The public test file was historically reused.** Phase 1 prospectively locked its
   final 25%, but earlier versions reported aggregate results over the full file. The
   locked-tail result is disclosed with that caveat; a new external time-forward
@@ -288,9 +300,10 @@ Defined in `terraform/` and applied manually. This is an infrastructure exercise
 not evidence of a running service: the ECS service has zero desired tasks, the
 container exits after verification, and no load balancer or scoring endpoint exists.
 
-- **S3 compliance bucket** with Object Lock in COMPLIANCE mode (5-year retention),
-  versioning, SSE, full public-access block, and lifecycle transition to Glacier at
-  90 days.
+- **Versioned S3 evidence bucket reference** with Object Lock in COMPLIANCE mode,
+  server-side encryption, full public-access block, an illustrative five-year policy,
+  and lifecycle transition to Glacier at 90 days. Configuration alone is not evidence
+  of legal suitability or an operating archive.
 - **IAM** task role scoped to `bedrock:InvokeModel` and the compliance bucket; no
   static keys in the task definition. The code invokes a cross-region inference
   profile, so the policy grants the profile ARN *and* the underlying foundation model
@@ -311,6 +324,7 @@ macros/              prequential target-encoding macro
 docs/
   str-narrative-design.md  why the hedging blacklist was replaced by grounding checks
   human-review-workflow.md Phase 2 states, invariants, interfaces, and honest boundary
+  evidence-integrity.md    Phase 3 preservation, receipts, verification, and limits
   graph-features.md        entity/graph layer: built, measured, and rejected
   target-encoding.md       causal encodings, bounded card history, and drift references
   materialization.md       why incremental materialization was measured and rejected
@@ -325,6 +339,7 @@ scripts/
   inference_engine.py  validation, scoring, alert selection
   case_management.py   persisted human-review/RGS state machine and event history
   case_cli.py          command-line case workflow
+  evidence.py          atomic content-addressed files and verified S3 receipts
   sar_agent.py         Bedrock narrative drafting, guardrails, quarantine, optional S3 attempt
   evaluate.py          model comparison, uncertainty, cost, calibration, slices, latency
   calibration.py       Brier / ECE / reliability, incl. the alerting region
@@ -348,6 +363,8 @@ causal feature construction, bounded card history, an evaluation lock, rolling
 validation, confidence intervals, baseline comparison, operating-capacity analysis,
 calibration/slice reporting, and latency measurement. Phase 2 (`0.3.0`) adds the
 persisted human-review and RGS state machine, role and rationale guards, concurrency
-control, case history, dashboard workflow, and CLI. The next priority is durable
-evidence handling, followed by security controls, service architecture, and
+control, case history, dashboard workflow, and CLI. Phase 3 (`0.4.0`) adds atomic
+case-linked evidence, event hash chaining, local integrity verification, and explicit
+S3 checksum/version receipts. The next priority is authentication, authorization,
+secrets and privacy controls, followed by service architecture and
 champion/challenger operations.

@@ -695,6 +695,39 @@ if triggered:
             row["metadata"] = json.dumps(row["metadata"], sort_keys=True)
         st.dataframe(history_rows, use_container_width=True, hide_index=True)
 
+    evidence_rows = case_store.list_evidence(case_record.case_id)
+    with st.expander(f"Evidence inventory ({len(evidence_rows)})"):
+        if evidence_rows:
+            st.dataframe(
+                [
+                    {
+                        "evidence_id": item.evidence_id,
+                        "type": item.evidence_type,
+                        "sha256": item.sha256,
+                        "bytes": item.byte_size,
+                        "archive_verified": bool(
+                            item.archive_receipt and item.archive_receipt.get("verified")
+                        ),
+                        "created_at": item.created_at,
+                    }
+                    for item in evidence_rows
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("No evidence artifacts are linked to this case.")
+        if st.button("Verify Case & Evidence Integrity"):
+            integrity = case_store.verify_integrity(case_record.case_id)
+            if integrity["ok"]:
+                st.success(
+                    f"Verified {integrity['events_verified']} events and "
+                    f"{integrity['evidence_verified']} evidence artifacts. "
+                    f"Chain head: `{integrity['chain_head']}`"
+                )
+            else:
+                st.error("Integrity verification failed: " + "; ".join(integrity["issues"]))
+
     if case_record.status == CaseStatus.ALERT_OPEN.value:
         review_rationale = st.text_area(
             "Assignment rationale",
@@ -783,9 +816,12 @@ if triggered:
     with status_col:
         s3_bucket = os.environ.get("COMPLIANCE_S3_BUCKET")
         if s3_bucket:
-            st.markdown(f"🔒 **Optional Draft Archive:** S3 Bucket `{s3_bucket}`")
+            st.markdown(f"🔒 **Configured Evidence Archive:** S3 Bucket `{s3_bucket}`")
         else:
-            st.markdown("ℹ️ **Optional Draft Archive:** Not configured (`COMPLIANCE_S3_BUCKET` missing)")
+            st.markdown(
+                "ℹ️ **Remote Evidence Archive:** Not configured "
+                "(`COMPLIANCE_S3_BUCKET` missing); local evidence remains hash-verifiable."
+            )
             
     if generate_btn:
         with st.spinner("Invoking narrative drafting assistant (AWS Bedrock / Claude)..."):
@@ -810,14 +846,33 @@ if triggered:
             with st.spinner("Checking factual-grounding guardrails and saving the draft..."):
                 try:
                     file_path = save_sar_report(
-                        selected_txn, p_m2_val, p_m3_val, p_m4_val, meta_score, st.session_state.narrative
+                        selected_txn,
+                        p_m2_val,
+                        p_m3_val,
+                        p_m4_val,
+                        meta_score,
+                        st.session_state.narrative,
+                        case_id=case_record.case_id,
+                        actor=reviewer_id,
+                        actor_role=reviewer_role,
+                        expected_case_version=case_record.version,
+                        case_store=case_store,
                     )
-                    st.success(f"Draft verified and saved locally to `{file_path}`")
-                    if s3_bucket:
-                        st.info(
-                            f"The save routine attempted optional archival to `{s3_bucket}`. "
-                            "This prototype does not return or verify an S3 receipt; inspect "
-                            "runtime logs before treating the archive as durable."
+                    saved = case_store.list_evidence(case_record.case_id)[-1]
+                    st.success(
+                        f"Draft preserved and linked as `{saved.evidence_id}` at `{file_path}`. "
+                        f"SHA-256: `{saved.sha256}`"
+                    )
+                    if saved.archive_receipt and saved.archive_receipt.get("verified"):
+                        archive = saved.archive_receipt
+                        st.success(
+                            f"S3 receipt verified: version `{archive['version_id']}`, "
+                            f"request `{archive.get('request_id')}`."
+                        )
+                    elif saved.archive_receipt:
+                        st.warning(
+                            "The local evidence is linked, but remote archival is unverified: "
+                            f"{saved.archive_receipt.get('error')}"
                         )
                 except ValueError as ve:
                     st.error(f"Draft validation failed: {ve}")

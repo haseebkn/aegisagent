@@ -9,6 +9,7 @@ workflow that is outside this portfolio project's scope.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import sqlite3
 import uuid
@@ -19,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.config import CASE_DB_PATH
+from scripts.evidence import EvidenceReceipt, verify_file
 
 
 class CaseStatus(str, Enum):
@@ -91,6 +93,22 @@ class CaseEvent:
     rationale: str
     metadata: dict[str, Any]
     occurred_at: str
+    previous_event_hash: str
+    event_hash: str
+
+
+@dataclass(frozen=True)
+class EvidenceRecord:
+    evidence_id: str
+    case_id: str
+    evidence_type: str
+    sha256: str
+    byte_size: int
+    media_type: str
+    local_path: str
+    archive_receipt: dict[str, Any] | None
+    created_at: str
+    created_by: str
 
 
 def _now() -> str:
@@ -109,6 +127,43 @@ def _role(value: ReviewerRole | str) -> ReviewerRole:
         return ReviewerRole(value)
     except ValueError as exc:
         raise AuthorizationError(f"Unknown reviewer role: {value}") from exc
+
+
+def _event_digest(
+    *,
+    event_id: str,
+    case_id: str,
+    sequence: int,
+    event_type: str,
+    from_status: str | None,
+    to_status: str,
+    actor: str,
+    actor_role: str,
+    rationale: str,
+    metadata_json: str,
+    occurred_at: str,
+    previous_event_hash: str,
+) -> str:
+    canonical = json.dumps(
+        {
+            "event_id": event_id,
+            "case_id": case_id,
+            "sequence": sequence,
+            "event_type": event_type,
+            "from_status": from_status,
+            "to_status": to_status,
+            "actor": actor,
+            "actor_role": actor_role,
+            "rationale": rationale,
+            "metadata": json.loads(metadata_json),
+            "occurred_at": occurred_at,
+            "previous_event_hash": previous_event_hash,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 class CaseStore:
@@ -156,13 +211,79 @@ class CaseStore:
                     rationale TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
                     occurred_at TEXT NOT NULL,
+                    previous_event_hash TEXT NOT NULL DEFAULT '',
+                    event_hash TEXT NOT NULL DEFAULT '',
                     UNIQUE(case_id, sequence)
+                );
+
+                CREATE TABLE IF NOT EXISTS case_evidence (
+                    evidence_id TEXT PRIMARY KEY,
+                    case_id TEXT NOT NULL REFERENCES cases(case_id),
+                    evidence_type TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+                    media_type TEXT NOT NULL,
+                    local_path TEXT NOT NULL,
+                    archive_receipt_json TEXT,
+                    created_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    UNIQUE(case_id, evidence_type, sha256)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_events_case ON case_events(case_id, sequence);
+                CREATE INDEX IF NOT EXISTS idx_evidence_case ON case_evidence(case_id, created_at);
                 """
             )
+            columns = {row[1] for row in con.execute("PRAGMA table_info(case_events)")}
+            needs_hash_backfill = False
+            if "previous_event_hash" not in columns:
+                con.execute(
+                    "ALTER TABLE case_events ADD COLUMN previous_event_hash TEXT NOT NULL DEFAULT ''"
+                )
+                needs_hash_backfill = True
+            if "event_hash" not in columns:
+                con.execute(
+                    "ALTER TABLE case_events ADD COLUMN event_hash TEXT NOT NULL DEFAULT ''"
+                )
+                needs_hash_backfill = True
+            incomplete_hashes = con.execute(
+                "SELECT 1 FROM case_events WHERE event_hash = '' LIMIT 1"
+            ).fetchone()
+            if needs_hash_backfill or incomplete_hashes:
+                self._backfill_event_hashes(con)
+
+    @staticmethod
+    def _backfill_event_hashes(con: sqlite3.Connection) -> None:
+        case_ids = [row[0] for row in con.execute("SELECT DISTINCT case_id FROM case_events")]
+        for case_id in case_ids:
+            previous = ""
+            rows = con.execute(
+                "SELECT * FROM case_events WHERE case_id = ? ORDER BY sequence", (case_id,)
+            ).fetchall()
+            for row in rows:
+                values = dict(row)
+                digest = _event_digest(
+                    event_id=values["event_id"],
+                    case_id=values["case_id"],
+                    sequence=values["sequence"],
+                    event_type=values["event_type"],
+                    from_status=values["from_status"],
+                    to_status=values["to_status"],
+                    actor=values["actor"],
+                    actor_role=values["actor_role"],
+                    rationale=values["rationale"],
+                    metadata_json=values["metadata_json"],
+                    occurred_at=values["occurred_at"],
+                    previous_event_hash=previous,
+                )
+                if values.get("previous_event_hash") != previous or values.get("event_hash") != digest:
+                    con.execute(
+                        """UPDATE case_events
+                           SET previous_event_hash = ?, event_hash = ? WHERE event_id = ?""",
+                        (previous, digest, values["event_id"]),
+                    )
+                previous = digest
 
     @staticmethod
     def _case(row: sqlite3.Row) -> CaseRecord:
@@ -173,6 +294,13 @@ class CaseStore:
         values = dict(row)
         values["metadata"] = json.loads(values.pop("metadata_json"))
         return CaseEvent(**values)
+
+    @staticmethod
+    def _evidence(row: sqlite3.Row) -> EvidenceRecord:
+        values = dict(row)
+        archive_json = values.pop("archive_receipt_json")
+        values["archive_receipt"] = json.loads(archive_json) if archive_json else None
+        return EvidenceRecord(**values)
 
     def create_alert_case(
         self,
@@ -208,6 +336,22 @@ class CaseStore:
             "threshold": threshold,
             "model_version": model_version,
         })
+        rationale = "Model score met the configured investigation-alert threshold."
+        metadata_json = json.dumps(event_metadata, sort_keys=True)
+        event_hash = _event_digest(
+            event_id=event_id,
+            case_id=case_id,
+            sequence=1,
+            event_type="alert_created",
+            from_status=None,
+            to_status=CaseStatus.ALERT_OPEN.value,
+            actor=actor,
+            actor_role=role.value,
+            rationale=rationale,
+            metadata_json=metadata_json,
+            occurred_at=timestamp,
+            previous_event_hash="",
+        )
         try:
             with self._connect() as con:
                 con.execute("BEGIN IMMEDIATE")
@@ -222,11 +366,11 @@ class CaseStore:
                 con.execute(
                     """INSERT INTO case_events
                        (event_id, case_id, sequence, event_type, from_status, to_status,
-                        actor, actor_role, rationale, metadata_json, occurred_at)
-                       VALUES (?, ?, 1, 'alert_created', NULL, ?, ?, ?, ?, ?, ?)""",
+                        actor, actor_role, rationale, metadata_json, occurred_at,
+                        previous_event_hash, event_hash)
+                       VALUES (?, ?, 1, 'alert_created', NULL, ?, ?, ?, ?, ?, ?, '', ?)""",
                     (event_id, case_id, CaseStatus.ALERT_OPEN.value, actor, role.value,
-                     "Model score met the configured investigation-alert threshold.",
-                     json.dumps(event_metadata, sort_keys=True), timestamp),
+                     rationale, metadata_json, timestamp, event_hash),
                 )
         except sqlite3.IntegrityError as exc:
             if "trans_num" in str(exc) or "UNIQUE constraint failed: cases.trans_num" in str(exc):
@@ -265,6 +409,193 @@ class CaseStore:
                 "SELECT * FROM case_events WHERE case_id = ? ORDER BY sequence", (case_id,)
             ).fetchall()
         return [self._event(row) for row in rows]
+
+    def list_evidence(self, case_id: str) -> list[EvidenceRecord]:
+        self.get_case(case_id)
+        with self._connect() as con:
+            rows = con.execute(
+                "SELECT * FROM case_evidence WHERE case_id = ? ORDER BY created_at, evidence_id",
+                (case_id,),
+            ).fetchall()
+        return [self._evidence(row) for row in rows]
+
+    def attach_evidence(
+        self,
+        case_id: str,
+        *,
+        receipt: EvidenceReceipt,
+        actor: str,
+        actor_role: ReviewerRole | str,
+        expected_version: int,
+    ) -> CaseRecord:
+        actor = _required_text(actor, "actor", 2)
+        role = _role(actor_role)
+        if receipt.case_id != case_id:
+            raise ValidationError(
+                f"Evidence belongs to {receipt.case_id}, not requested case {case_id}"
+            )
+        timestamp = _now()
+        metadata = asdict(receipt)
+        metadata_json = json.dumps(metadata, sort_keys=True)
+        rationale = f"Preserved and linked {receipt.evidence_type} evidence {receipt.evidence_id}."
+        with self._connect() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row = con.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
+            if row is None:
+                raise CaseNotFound(f"Unknown case: {case_id}")
+            current = self._case(row)
+            if current.version != expected_version:
+                raise ConcurrencyError(
+                    f"Case {case_id} changed from version {expected_version} to "
+                    f"{current.version}; reload before attaching evidence"
+                )
+            if current.status != CaseStatus.UNDER_REVIEW.value:
+                raise InvalidTransition(
+                    f"Evidence may only be attached during active review, not {current.status}"
+                )
+            next_version = current.version + 1
+            previous_hash = con.execute(
+                "SELECT event_hash FROM case_events WHERE case_id = ? ORDER BY sequence DESC LIMIT 1",
+                (case_id,),
+            ).fetchone()[0]
+            event_id = str(uuid.uuid4())
+            event_hash = _event_digest(
+                event_id=event_id,
+                case_id=case_id,
+                sequence=next_version,
+                event_type="evidence_attached",
+                from_status=current.status,
+                to_status=current.status,
+                actor=actor,
+                actor_role=role.value,
+                rationale=rationale,
+                metadata_json=metadata_json,
+                occurred_at=timestamp,
+                previous_event_hash=previous_hash,
+            )
+            try:
+                con.execute(
+                    """INSERT INTO case_evidence
+                       (evidence_id, case_id, evidence_type, sha256, byte_size, media_type,
+                        local_path, archive_receipt_json, created_at, created_by)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        receipt.evidence_id,
+                        case_id,
+                        receipt.evidence_type,
+                        receipt.sha256,
+                        receipt.byte_size,
+                        receipt.media_type,
+                        receipt.local_path,
+                        json.dumps(receipt.archive_receipt, sort_keys=True)
+                        if receipt.archive_receipt else None,
+                        receipt.created_at,
+                        actor,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValidationError(
+                    f"Identical {receipt.evidence_type} evidence is already linked to {case_id}"
+                ) from exc
+            con.execute(
+                """UPDATE cases SET updated_at = ?, version = ?
+                   WHERE case_id = ? AND version = ?""",
+                (timestamp, next_version, case_id, expected_version),
+            )
+            con.execute(
+                """INSERT INTO case_events
+                   (event_id, case_id, sequence, event_type, from_status, to_status,
+                    actor, actor_role, rationale, metadata_json, occurred_at,
+                    previous_event_hash, event_hash)
+                   VALUES (?, ?, ?, 'evidence_attached', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event_id,
+                    case_id,
+                    next_version,
+                    current.status,
+                    current.status,
+                    actor,
+                    role.value,
+                    rationale,
+                    metadata_json,
+                    timestamp,
+                    previous_hash,
+                    event_hash,
+                ),
+            )
+        return self.get_case(case_id)
+
+    def verify_integrity(self, case_id: str) -> dict[str, Any]:
+        case = self.get_case(case_id)
+        history = self.history(case_id)
+        evidence = self.list_evidence(case_id)
+        issues: list[str] = []
+        previous = ""
+        for event in history:
+            metadata_json = json.dumps(event.metadata, sort_keys=True)
+            expected = _event_digest(
+                event_id=event.event_id,
+                case_id=event.case_id,
+                sequence=event.sequence,
+                event_type=event.event_type,
+                from_status=event.from_status,
+                to_status=event.to_status,
+                actor=event.actor,
+                actor_role=event.actor_role,
+                rationale=event.rationale,
+                metadata_json=metadata_json,
+                occurred_at=event.occurred_at,
+                previous_event_hash=previous,
+            )
+            if event.previous_event_hash != previous:
+                issues.append(f"Event {event.sequence} has a broken previous-hash link")
+            if event.event_hash != expected:
+                issues.append(f"Event {event.sequence} content hash does not match")
+            previous = event.event_hash
+        if history and case.version != history[-1].sequence:
+            issues.append(
+                f"Case version {case.version} does not match last event {history[-1].sequence}"
+            )
+        evidence_events = {
+            event.metadata.get("evidence_id"): event.metadata
+            for event in history
+            if event.event_type == "evidence_attached"
+        }
+        registered_ids = {item.evidence_id for item in evidence}
+        for evidence_id in evidence_events:
+            if evidence_id not in registered_ids:
+                issues.append(f"Evidence event {evidence_id} has no matching evidence record")
+        for item in evidence:
+            issues.extend(verify_file(item.local_path, item.sha256, item.byte_size))
+            event_metadata = evidence_events.get(item.evidence_id)
+            if event_metadata is None:
+                issues.append(f"Evidence {item.evidence_id} has no matching case event")
+            else:
+                committed = {
+                    "evidence_type": item.evidence_type,
+                    "sha256": item.sha256,
+                    "byte_size": item.byte_size,
+                    "media_type": item.media_type,
+                    "local_path": item.local_path,
+                    "archive_receipt": item.archive_receipt,
+                }
+                for field, value in committed.items():
+                    if event_metadata.get(field) != value:
+                        issues.append(
+                            f"Evidence {item.evidence_id} field {field} differs from its case event"
+                        )
+            if item.archive_receipt and not item.archive_receipt.get("verified"):
+                issues.append(f"Evidence {item.evidence_id} has an unverified archive receipt")
+        return {
+            "ok": not issues,
+            "case_id": case_id,
+            "case_version": case.version,
+            "events_verified": len(history),
+            "evidence_verified": len(evidence),
+            "chain_head": previous,
+            "issues": issues,
+            "verified_at": _now(),
+        }
 
     def start_review(
         self,
@@ -362,14 +693,36 @@ class CaseStore:
             )
             if updated.rowcount != 1:
                 raise ConcurrencyError(f"Case {case_id} changed while the transition was saved")
+            previous_hash_row = con.execute(
+                "SELECT event_hash FROM case_events WHERE case_id = ? ORDER BY sequence DESC LIMIT 1",
+                (case_id,),
+            ).fetchone()
+            previous_hash = previous_hash_row[0] if previous_hash_row else ""
+            event_id = str(uuid.uuid4())
+            metadata_json = "{}"
+            event_hash = _event_digest(
+                event_id=event_id,
+                case_id=case_id,
+                sequence=next_version,
+                event_type=event_type,
+                from_status=current.status,
+                to_status=to_status.value,
+                actor=actor,
+                actor_role=actor_role.value,
+                rationale=rationale,
+                metadata_json=metadata_json,
+                occurred_at=timestamp,
+                previous_event_hash=previous_hash,
+            )
             con.execute(
                 """INSERT INTO case_events
                    (event_id, case_id, sequence, event_type, from_status, to_status,
-                    actor, actor_role, rationale, metadata_json, occurred_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)""",
-                (str(uuid.uuid4()), case_id, next_version, event_type,
+                    actor, actor_role, rationale, metadata_json, occurred_at,
+                    previous_event_hash, event_hash)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (event_id, case_id, next_version, event_type,
                  current.status, to_status.value, actor, actor_role.value,
-                 rationale, timestamp),
+                 rationale, metadata_json, timestamp, previous_hash, event_hash),
             )
         return self.get_case(case_id)
 
@@ -380,3 +733,7 @@ def case_to_dict(record: CaseRecord) -> dict[str, Any]:
 
 def event_to_dict(event: CaseEvent) -> dict[str, Any]:
     return asdict(event)
+
+
+def evidence_to_dict(evidence: EvidenceRecord) -> dict[str, Any]:
+    return asdict(evidence)

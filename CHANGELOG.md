@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0 — 2026-08-28
+
+Phase 3 links narrative evidence to cases and makes integrity failures observable.
+
+- Replaced timestamp-named draft/quarantine writes with atomic, content-addressed
+  evidence artifacts carrying SHA-256 and byte-count receipts.
+- Added a case evidence inventory and hash-chained event ledger, including automatic
+  migration and backfill for Phase 2 SQLite databases.
+- Added end-to-end verification of event links, event contents, evidence files, case
+  projection version, and remote archive receipt status.
+- Added optional S3 uploads with SHA-256 request checksums; an archive is marked
+  verified only when S3 returns the expected checksum and an object VersionId.
+- Preserved local, case-linked evidence when remote archival fails and recorded the
+  attempt as unverified instead of silently claiming success.
+- Added dashboard evidence inventory/integrity controls and CLI `show`/`verify`
+  output, plus 15 evidence, migration, archive-receipt, and tamper-detection tests.
+- Removed infrastructure language that implied a configured retention period or
+  Object Lock mode alone establishes FINTRAC compliance.
+
 ## 0.3.0 — 2026-08-28
 
 Phase 2 adds an explicit human-review and RGS decision workflow without crossing the
