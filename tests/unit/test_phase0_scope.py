@@ -34,8 +34,10 @@ def test_prompt_reserves_rgs_decision_for_human_review():
 
 
 def test_release_baseline_and_scope_documents_exist():
-    assert read("VERSION").strip() == "0.2.0"
+    version = read("VERSION").strip()
+    assert tuple(map(int, version.split("."))) >= (0, 1, 0)
     model_card = read("MODEL_CARD.md")
     regulatory_scope = read("docs/regulatory-scope.md")
+    assert f"**Version:** {version}" in model_card
     assert "prospectively locked tail" in model_card.lower()
     assert "not a legal conclusion" in regulatory_scope

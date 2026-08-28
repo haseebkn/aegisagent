@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0 — 2026-08-28
+
+Phase 2 adds an explicit human-review and RGS decision workflow without crossing the
+boundary into regulatory filing.
+
+- Added a persisted `alert_open → under_review → RGS disposition` state machine.
+- Enforced threshold eligibility, identified actors, documented rationales, role-gated
+  RGS decisions, terminal dispositions, and optimistic concurrency.
+- Added a case projection and append-only application event history in a dedicated
+  SQLite store, with no filing or submission state.
+- Added dashboard case creation, assignment, case history, and disposition controls;
+  narrative drafting now requires an active human review.
+- Added a CLI for creating, reviewing, deciding, listing, and inspecting cases.
+- Added 15 state-machine regression tests and documented the security, durability,
+  retention, authentication, and reporting-workflow boundaries.
+
 ## 0.2.0 — 2026-08-28
 
 Phase 1 makes the model-development and evaluation path temporal and auditable.

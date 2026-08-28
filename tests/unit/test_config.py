@@ -9,7 +9,8 @@ from scripts import config
 def test_defaults_are_relative_to_repo_root():
     """Regression: 21 hardcoded 'e:/AegisAgent/...' defaults meant nothing ran
     outside one machine."""
-    for path in (config.DB_PATH, config.ARTIFACTS_DIR, config.COMPLIANCE_LOGS_DIR):
+    for path in (config.DB_PATH, config.ARTIFACTS_DIR, config.COMPLIANCE_LOGS_DIR,
+                 config.CASE_DB_PATH):
         assert config.PROJECT_ROOT in path.parents or path == config.PROJECT_ROOT
         assert "AegisAgent" not in str(path).replace(str(config.PROJECT_ROOT), "")
 

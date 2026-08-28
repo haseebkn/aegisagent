@@ -12,6 +12,13 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from scripts.config import ARTIFACTS_DIR, DB_PATH
+from scripts.case_management import (
+    CaseManagementError,
+    CaseStatus,
+    CaseStore,
+    ReviewerRole,
+    event_to_dict,
+)
 from scripts.inference_engine import load_models, run_inference
 from scripts.pii import mask_pan
 from scripts.sar_agent import generate_sar_narrative, save_sar_report
@@ -306,6 +313,21 @@ st.markdown(
 
 # Sidebar Controls
 st.sidebar.header("🔍 Transaction Selection")
+
+st.sidebar.subheader("👤 Human reviewer")
+reviewer_id = st.sidebar.text_input(
+    "Reviewer identifier",
+    help="Use a stable workforce identifier. This demo does not authenticate it.",
+).strip()
+reviewer_role = st.sidebar.selectbox(
+    "Workflow role",
+    options=[role.value for role in ReviewerRole],
+    format_func=lambda value: value.replace("_", " ").title(),
+    help=(
+        "Role selection is self-attested in this local demo. Production authorization "
+        "and segregation-of-duties controls remain out of scope."
+    ),
+)
 
 # Load data and prepare dropdown options
 txns = get_db_transactions()
@@ -624,6 +646,123 @@ if triggered:
         "A reporting entity's authorized investigator must assess the facts, context, "
         "and applicable ML/TF indicators."
     )
+
+    st.markdown("#### Human review case")
+    case_store = CaseStore()
+    case_record = case_store.find_by_transaction(selected_txn["trans_num"])
+
+    if case_record is None:
+        st.caption(
+            "No case exists for this alert. Creating one records the score, threshold, "
+            "model version, actor, and timestamp; it does not make an RGS determination."
+        )
+        if st.button(
+            "Create Investigation Case",
+            disabled=len(reviewer_id) < 2,
+            use_container_width=True,
+        ):
+            try:
+                case_store.create_alert_case(
+                    trans_num=selected_txn["trans_num"],
+                    model_score=meta_score,
+                    threshold=threshold,
+                    model_version=model_version,
+                    actor=reviewer_id,
+                    actor_role=reviewer_role,
+                    metadata={"source": "streamlit_dashboard"},
+                )
+                st.rerun()
+            except CaseManagementError as exc:
+                st.error(f"Case creation rejected: {exc}")
+        if len(reviewer_id) < 2:
+            st.info("Enter a reviewer identifier in the sidebar to create a case.")
+        st.stop()
+
+    status_labels = {
+        CaseStatus.ALERT_OPEN.value: "Alert open — awaiting assignment",
+        CaseStatus.UNDER_REVIEW.value: "Under human review",
+        CaseStatus.RGS_NOT_REACHED.value: "Closed — RGS not reached",
+        CaseStatus.RGS_REACHED.value: "Closed — RGS reached; approved reporting workflow required",
+    }
+    st.write(f"**Case:** `{case_record.case_id}`")
+    st.write(f"**Status:** {status_labels[case_record.status]}")
+    st.write(f"**Assigned to:** `{case_record.assigned_to or 'Unassigned'}`")
+    st.caption(f"Case version {case_record.version} · updated {case_record.updated_at}")
+
+    with st.expander("Case event history"):
+        history_rows = [event_to_dict(event) for event in case_store.history(case_record.case_id)]
+        for row in history_rows:
+            row["metadata"] = json.dumps(row["metadata"], sort_keys=True)
+        st.dataframe(history_rows, use_container_width=True, hide_index=True)
+
+    if case_record.status == CaseStatus.ALERT_OPEN.value:
+        review_rationale = st.text_area(
+            "Assignment rationale",
+            placeholder="Document why this alert is being assigned for investigation (20+ characters).",
+        )
+        if st.button(
+            "Assign to Me & Start Review",
+            disabled=len(reviewer_id) < 2,
+            use_container_width=True,
+        ):
+            try:
+                case_store.start_review(
+                    case_record.case_id,
+                    actor=reviewer_id,
+                    actor_role=reviewer_role,
+                    rationale=review_rationale,
+                    expected_version=case_record.version,
+                )
+                st.rerun()
+            except CaseManagementError as exc:
+                st.error(f"Review transition rejected: {exc}")
+        st.stop()
+
+    if case_record.status == CaseStatus.UNDER_REVIEW.value:
+        st.info(
+            "Narrative drafting remains optional. The disposition below must be based on "
+            "the investigator's assessment of the available facts and institutional policy."
+        )
+        with st.expander("Record authorized RGS disposition"):
+            decision = st.radio(
+                "Disposition",
+                options=("RGS not reached", "RGS reached"),
+                horizontal=True,
+            )
+            decision_rationale = st.text_area(
+                "Decision rationale",
+                placeholder=(
+                    "Document the facts and indicators supporting the human decision "
+                    "(20+ characters)."
+                ),
+            )
+            st.caption(
+                "Only the authorized_rgs_reviewer role can save a disposition. Selecting "
+                "that role here is a demo assertion, not production authentication."
+            )
+            if st.button("Save RGS Disposition", use_container_width=True):
+                try:
+                    case_store.record_rgs_decision(
+                        case_record.case_id,
+                        reached=decision == "RGS reached",
+                        actor=reviewer_id,
+                        actor_role=reviewer_role,
+                        rationale=decision_rationale,
+                        expected_version=case_record.version,
+                    )
+                    st.rerun()
+                except CaseManagementError as exc:
+                    st.error(f"RGS disposition rejected: {exc}")
+    else:
+        if case_record.status == CaseStatus.RGS_REACHED.value:
+            st.warning(
+                "RGS was recorded by the human reviewer. This project does not prepare, "
+                "approve, submit, or track a FINTRAC filing; continue in the institution's "
+                "approved reporting workflow."
+            )
+        else:
+            st.success("Human review concluded with RGS not reached. No filing action was created.")
+        st.stop()
     
     # Store the narrative state in st.session_state to persist across button clicks/renders
     if "narrative" not in st.session_state:

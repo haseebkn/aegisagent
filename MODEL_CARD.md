@@ -1,6 +1,6 @@
 # AegisAgent model card
 
-**Version:** 0.2.0
+**Version:** 0.3.0
 
 **Status:** portfolio/research baseline
 
@@ -105,16 +105,28 @@ breach creates a model alert only. An authorized reporting-entity reviewer must
 evaluate facts, context, and relevant indicators and decide whether RGS is reached.
 See [docs/regulatory-scope.md](docs/regulatory-scope.md).
 
-The optional LLM output is an unapproved narrative draft. Numeric grounding reduces
+The Phase 2 demo persists threshold-breaching alerts as cases and enforces the path
+`alert_open → under_review → rgs_not_reached / rgs_reached`. Starting review requires
+an identified investigator and rationale; only the `authorized_rgs_reviewer` role can
+record a terminal disposition. Every transition records an actor, role, rationale,
+timestamp, and case version. An RGS-reached disposition does not create or submit a
+report—it hands off to an approved reporting workflow outside this project.
+
+The optional LLM output is an unapproved narrative draft available during active
+human review. Numeric grounding reduces
 some hallucinations but does not prove entailment or completeness. The project does
-not implement a complete FINTRAC form, approval workflow, or submission.
+not implement a complete FINTRAC form, reporting approval, submission, receipt
+tracking, or amendment workflow.
 
 ## Privacy, security, and deployment limitations
 
 Names and PANs are masked before the Bedrock request, but location, occupation,
-gender, and other quasi-identifiers remain. The demo has no authentication or RBAC,
-and its HTML rendering and archival behavior require hardening. It must use synthetic
-data only in its current state.
+gender, and other quasi-identifiers remain. The demo has no authentication or
+production RBAC: its reviewer identity and role are self-attested UI/CLI inputs. Its
+SQLite history is append-only through the application API, not tamper-evident or a
+compliant record archive. HTML rendering, encryption, backup, retention, access
+control, and archival behavior require hardening. It must use synthetic data only in
+its current state.
 
 Nothing serves production traffic. Streamlit runs locally. The Docker image runs a
 verifier and exits. Terraform defines an AWS reference scaffold with an ECS desired

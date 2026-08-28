@@ -123,9 +123,10 @@ false positives.
   modes observed so far. A new phrasing will pass until the pattern is added.
 - **Tolerance is a trade-off.** The 1% relative window accepts rounding; it would
   also accept a figure wrong by less than 1%.
-- **No human-review workflow exists.** Quarantined narratives accumulate in a
-  directory. In anything operational this would be a queue with assignment, SLA and
-  disposition tracking, and those dispositions would feed back into evaluation.
+- **Narrative evidence is not yet attached to the case ledger.** Phase 2 adds case
+  assignment and disposition tracking, but draft files and quarantined narratives
+  still live outside that event history. Durable evidence references, integrity
+  proofs, retention, and recovery remain later work.
 
 ## Bearing on the wider system
 

@@ -47,8 +47,11 @@ fraudTrain.csv ─┐
                 ├─► dbt + DuckDB ──► feature mart ──► stacked ensemble ──► alert threshold
 fraudTest.csv  ─┘                                                        │
                                                                          ▼
-                                              investigator assessment ──► optional 5W+H draft
-                                                                         (local; optional S3 attempt)
+                                            alert case ──► human review ──► RGS disposition
+                                                               │                  │
+                                                               ▼                  ▼
+                                                    optional 5W+H draft   reporting workflow
+                                                    (not a filing)         (out of scope)
 ```
 
 **Feature layer (dbt → DuckDB).** Staging views read the raw CSVs; intermediate
@@ -67,10 +70,17 @@ use the prior 90 days, and velocity excludes the current event. `fraudTest.csv` 
 historically inspected, so even the prospectively locked tail is not described as a
 pristine independent test.
 
-**Narrative layer.** Only a transaction above the model threshold is eligible for an
-optional narrative draft; the threshold creates an investigation alert, not an RGS
-determination or filing obligation. An authorized human reviewer must assess the
-facts, context, and applicable ML/TF indicators. Eligible alerts can be sent to AWS
+**Human-review layer.** A threshold-breaching transaction can create one persisted
+case. The enforced workflow is `alert_open → under_review → rgs_not_reached /
+rgs_reached`; assignment and disposition require identified actors and rationales,
+and only the asserted `authorized_rgs_reviewer` role can record a terminal RGS
+decision. Every transition is appended to local case history with optimistic
+concurrency protection. No state represents filing or submission. See
+[docs/human-review-workflow.md](docs/human-review-workflow.md).
+
+**Narrative layer.** Narrative drafting is available only while a case is under human
+review. The threshold creates an investigation alert, not an RGS determination or
+filing obligation. Eligible alerts can be sent to AWS
 Bedrock (Claude Haiku 4.5) with a 5W+H drafting prompt. A retry loop enforces
 **factual grounding**—every quantity in the
 narrative must trace to the payload, and claims about data the pipeline never
@@ -109,8 +119,8 @@ streamlit run app.py
 ```
 
 Every path is env-overridable (`DBT_DB_PATH`, `MODELS_ARTIFACTS_DIR`,
-`COMPLIANCE_LOGS_DIR`, `AEGIS_RAW_DATA_DIR`) and defaults to a location relative to
-the repo root — see `scripts/config.py`.
+`COMPLIANCE_LOGS_DIR`, `AEGIS_CASE_DB_PATH`, `AEGIS_RAW_DATA_DIR`) and defaults to a
+location relative to the repo root — see `scripts/config.py`.
 
 ### Verification container
 
@@ -143,6 +153,7 @@ Streamlit dashboard or expose a real-time scoring API.
 | `python scripts/drift.py --fail-on-significant` | PSI + KS between the training and scoring windows, across all 19 model features. Exits non-zero on significant drift; runs as a gate in CI. Target encodings are compared on their serving-equivalent columns so the gate measures data, not encoding construction ([docs/target-encoding.md](docs/target-encoding.md)). |
 | `python scripts/calibration.py` | Brier, ECE/MCE and reliability, reported separately for the alerting region. |
 | `python scripts/graph_signal.py` | Bipartite graph density and univariate power of the entity features. |
+| `python scripts/case_cli.py --help` | Create, assign, disposition, list, and inspect human-review cases without the dashboard. |
 
 ### Threshold selection is a business decision
 
@@ -200,7 +211,7 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 | Job | What it does |
 |---|---|
 | Lint | `ruff check` on correctness rules only (F, E9, W6). Exists because dead code accumulated twice, including a function renamed at its definition but not its call site — which no test could catch, since nothing imports it. |
-| Unit tests | 71 pytest cases over PII masking, grounding, alert gates, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, and path resolution. |
+| Unit tests | 86 pytest cases over PII masking, grounding, alert gates, the human-review state machine, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, and path resolution. |
 | dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`), runs the **real** dbt models and data tests against it — no 500 MB download — then runs the drift gate. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
 | Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard: `.dockerignore` once excluded `models/`, `models_artifacts/` and the DuckDB file, and `docker-compose` bind-mounted the repo over `/app`, hiding it. |
@@ -246,8 +257,13 @@ Read this before drawing conclusions from the metrics above.
 - **Grounding checks are necessary, not sufficient.** Quantities are verified against
   the payload and a list of unsupported claim types is screened, but no claim-level
   entailment checking is done: a narrative can use only real figures and still draw
-  an unsupported inference. Every narrative needs human review, and no human-review
-  workflow exists beyond a quarantine directory.
+  an unsupported inference. Phase 2 requires an active human-review case before a
+  narrative can be drafted, but draft and quarantine files are not yet attached to
+  the case event history.
+- **Workflow roles are not authentication.** The dashboard and CLI enforce state and
+  role rules, but identities and roles are self-attested. The SQLite history is
+  transactional and append-only through the application API, not tamper-evident,
+  access-controlled, backed up, or retention-managed.
 - **The public test file was historically reused.** Phase 1 prospectively locked its
   final 25%, but earlier versions reported aggregate results over the full file. The
   locked-tail result is disclosed with that caveat; a new external time-forward
@@ -294,6 +310,7 @@ models/              dbt project (staging → intermediate → marts)
 macros/              prequential target-encoding macro
 docs/
   str-narrative-design.md  why the hedging blacklist was replaced by grounding checks
+  human-review-workflow.md Phase 2 states, invariants, interfaces, and honest boundary
   graph-features.md        entity/graph layer: built, measured, and rejected
   target-encoding.md       causal encodings, bounded card history, and drift references
   materialization.md       why incremental materialization was measured and rejected
@@ -306,6 +323,8 @@ scripts/
   rolling_validate.py  expanding-window ensemble validation
   evaluation_utils.py  uncertainty, calibration, subgroup and split helpers
   inference_engine.py  validation, scoring, alert selection
+  case_management.py   persisted human-review/RGS state machine and event history
+  case_cli.py          command-line case workflow
   sar_agent.py         Bedrock narrative drafting, guardrails, quarantine, optional S3 attempt
   evaluate.py          model comparison, uncertainty, cost, calibration, slices, latency
   calibration.py       Brier / ECE / reliability, incl. the alerting region
@@ -324,9 +343,11 @@ app.py               Streamlit investigator dashboard
 
 ## Roadmap status
 
-Phase 0 (`0.1.0`) established honest terminology and scope. Phase 1 (`0.2.0`) adds
+Phase 0 (`0.1.0`) established honest terminology and scope. Phase 1 (`0.2.0`) added
 causal feature construction, bounded card history, an evaluation lock, rolling
 validation, confidence intervals, baseline comparison, operating-capacity analysis,
-calibration/slice reporting, and latency measurement. The next priority is the human
-review and RGS state machine, followed by durable evidence handling, security
-controls, service architecture, and champion/challenger operations.
+calibration/slice reporting, and latency measurement. Phase 2 (`0.3.0`) adds the
+persisted human-review and RGS state machine, role and rationale guards, concurrency
+control, case history, dashboard workflow, and CLI. The next priority is durable
+evidence handling, followed by security controls, service architecture, and
+champion/challenger operations.

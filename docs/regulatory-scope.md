@@ -28,10 +28,12 @@ model score -> alert -> authorized human review -> RGS not reached / RGS reached
                                   approved reporting workflow (out of scope)
 ```
 
-The current prototype implements the first two steps and an optional drafting aid.
-It does not implement case assignment, investigator disposition, RGS approval,
-Schedule 1 validation, authorized submission, confirmation receipt, amendment, or
-regulatory record management.
+The Phase 2 prototype implements the alert, assignment, active-review, and human RGS
+disposition steps, plus an optional drafting aid. RGS disposition is role-gated in
+the application, requires a rationale, and is recorded in case history. The local
+demo does not authenticate the asserted identity or role. It does not implement
+Schedule 1 validation, reporting approval, authorized submission, confirmation
+receipt, amendment, or regulatory record management.
 
 ## Terminology used in this repository
 
@@ -39,6 +41,9 @@ regulatory record management.
 - **Narrative draft:** unapproved text generated from an alert for human review.
 - **RGS determination:** a decision belonging to the reporting entity's authorized
   human process; never a model output.
+- **Case history:** the local SQLite event stream for alert creation, assignment, and
+  disposition. It is append-only through this application's API but is not a
+  tamper-evident or regulated record archive.
 - **STR:** a report prepared and submitted through an authorized FINTRAC reporting
   workflow. AegisAgent does not create or submit one.
 - **Archive attempt:** the current code can attempt to copy a draft to S3. It does not
