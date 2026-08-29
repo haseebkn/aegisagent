@@ -31,6 +31,11 @@ Databases created before Phase 4A are migrated with the sentinel organization
 production identities cannot implicitly claim ownership. A real migration must map
 each legacy case to a verified organization through an approved administrative process.
 
+Transaction identifiers are unique only within an organization. Reads resolve case
+and transaction identifiers inside the principal's organization boundary, so an
+identifier used by another tenant neither blocks creation nor reveals that tenant's
+record.
+
 ## Modes and fail-closed behavior
 
 `AEGIS_SECURITY_MODE=development` enables a conspicuously labelled local identity
@@ -44,16 +49,22 @@ turn a development identity into production authentication.
 
 ## Authorization policy
 
-The policy is deny by default:
+The policy is deny by default and each role has an explicit permission set. Adding a
+new permission to the application cannot silently grant it to an existing role.
 
-| Operation | Investigator | Authorized RGS reviewer |
-|---|---:|---:|
-| Read organization cases | Yes | Yes |
-| Create threshold alert | Yes | Yes |
-| Start review | Yes | Yes |
-| Attach evidence | Yes | Yes |
-| Verify integrity | Yes | Yes |
-| Record RGS disposition | No | Yes |
+| Operation | Investigator | Authorized RGS reviewer | Alert ingestor | Model governance reviewer |
+|---|---:|---:|---:|---:|
+| Read organization cases | Yes | Yes | No | Yes |
+| Start review / attach evidence | Yes | Yes | No | No |
+| Verify case integrity | Yes | Yes | No | No |
+| Record RGS disposition | No | Yes | No | No |
+| Submit verified model output to the HTTP alert endpoint | No | No | Yes | No |
+| Compare, promote, or roll back models | No | No | No | Yes |
+| Export aggregate operational feedback | No | No | No | Yes |
+
+The local Streamlit and case CLI paths add the alert-ingestor role only at their
+in-process model-output boundary. A production adapter must grant that role solely to
+an authenticated scoring service, not to an interactive investigator session.
 
 This is application authorization, not a replacement for identity-provider controls.
 The future adapter must map verified Clerk organization roles/permissions to these

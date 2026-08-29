@@ -23,7 +23,7 @@ All workflow operations are under `/v1`:
 
 | Method and path | Domain operation |
 |---|---|
-| `POST /v1/cases` | Create a threshold-breaching investigation alert |
+| `POST /v1/cases` | Ingest a threshold-breaching alert from a trusted scoring service |
 | `GET /v1/cases` | List the caller's organization-scoped cases |
 | `GET /v1/cases/{case_id}` | Read one authorized case |
 | `POST /v1/cases/{case_id}/review` | Start human review with rationale and expected version |
@@ -40,6 +40,14 @@ Requests reject unknown fields, non-finite scores, out-of-range values, oversize
 rationales, and coercion of strings into RGS booleans. Mutations require the caller's
 last observed case version. A stale version returns HTTP 409 and never overwrites the
 newer state.
+
+Alert creation is a machine-to-machine trust boundary. `POST /v1/cases` additionally
+requires `alert:ingest_verified_model_output`; ordinary investigator and RGS-review
+roles are denied even if they can work an existing case. The local Streamlit and CLI
+demonstrations attach this permission at the point where they run the model. A
+production identity adapter must map it only from a verified scoring-service identity.
+This prevents an interactive caller from choosing arbitrary scores, thresholds, or
+model versions and presenting them as model output.
 
 ## Health and failure behavior
 

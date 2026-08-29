@@ -65,3 +65,22 @@ def test_resolve_model_dir_raises_on_stale_pointer(tmp_path):
 
 def test_resolve_model_dir_allows_flat_layout_without_pointer(tmp_path):
     assert config.resolve_model_dir(tmp_path) == tmp_path
+
+
+def test_resolve_model_dir_fails_closed_when_registry_and_pointer_disagree(tmp_path):
+    (tmp_path / "v1").mkdir()
+    (tmp_path / "v2").mkdir()
+    (tmp_path / "latest_version.txt").write_text("v1")
+    (tmp_path / "registry.json").write_text('{"champion": "v2"}')
+    with pytest.raises(RuntimeError, match="disagree"):
+        config.resolve_model_dir(tmp_path)
+
+
+def test_registry_defaults_beside_overridden_artifacts(monkeypatch, tmp_path):
+    monkeypatch.setenv("MODELS_ARTIFACTS_DIR", str(tmp_path / "artifacts"))
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.MODEL_REGISTRY_PATH == tmp_path / "artifacts" / "registry.json"
+    finally:
+        monkeypatch.delenv("MODELS_ARTIFACTS_DIR")
+        importlib.reload(config)

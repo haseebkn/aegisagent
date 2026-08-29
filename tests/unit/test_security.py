@@ -1,9 +1,11 @@
 import pytest
 
-from scripts.case_management import AuthorizationError, CaseStore
+from scripts.case_management import AuthorizationError, CaseNotFound, CaseStore
 from scripts.security import (
+    ALERT_INGESTOR,
     AUTHORIZED_RGS_REVIEWER,
     INVESTIGATOR,
+    MODEL_GOVERNANCE_REVIEWER,
     AuthenticationRequired,
     Permission,
     PermissionDenied,
@@ -38,6 +40,24 @@ def test_investigator_cannot_escalate_to_rgs_permission():
         require_permission(identity, Permission.RECORD_RGS_DECISION)
 
 
+def test_only_model_governance_role_can_promote_models():
+    investigator = principal("investigator-17")
+    rgs_reviewer = principal("rgs-reviewer", AUTHORIZED_RGS_REVIEWER)
+    governance = principal("model-reviewer", MODEL_GOVERNANCE_REVIEWER)
+    with pytest.raises(PermissionDenied):
+        require_permission(investigator, Permission.PROMOTE_MODEL)
+    with pytest.raises(PermissionDenied):
+        require_permission(rgs_reviewer, Permission.PROMOTE_MODEL)
+    with pytest.raises(PermissionDenied):
+        require_permission(rgs_reviewer, Permission.EXPORT_OPERATIONAL_FEEDBACK)
+    require_permission(governance, Permission.PROMOTE_MODEL)
+    require_permission(governance, Permission.EXPORT_OPERATIONAL_FEEDBACK)
+    ingestor = principal("model-scoring-service", ALERT_INGESTOR)
+    require_permission(ingestor, Permission.INGEST_ALERT)
+    with pytest.raises(PermissionDenied):
+        require_permission(ingestor, Permission.READ_CASE)
+
+
 def test_case_events_commit_verified_identity_without_tokens(tmp_path):
     identity = principal("investigator-17")
     store = CaseStore(tmp_path / "cases.sqlite3", principal=identity)
@@ -65,7 +85,7 @@ def test_cross_organization_case_access_is_denied(tmp_path):
         model_version="v-security",
         principal=owner,
     )
-    with pytest.raises(AuthorizationError, match="Cross-organization"):
+    with pytest.raises(CaseNotFound):
         store.get_case(case.case_id, principal=outsider)
 
 
@@ -83,6 +103,26 @@ def test_case_listing_is_scoped_to_principal_organization(tmp_path):
         )
     assert [case.trans_num for case in store.list_cases(principal=org_a)] == ["txn-a"]
     assert [case.trans_num for case in store.list_cases(principal=org_b)] == ["txn-b"]
+
+
+def test_transaction_uniqueness_is_scoped_to_organization(tmp_path):
+    store = CaseStore(tmp_path / "cases.sqlite3")
+    org_a = principal("investigator-a", organization="org-a")
+    org_b = principal("investigator-b", organization="org-b")
+    for identity in (org_a, org_b):
+        store.create_alert_case(
+            trans_num="shared-provider-reference",
+            model_score=0.9,
+            threshold=0.8,
+            model_version="v-security",
+            principal=identity,
+        )
+    assert store.find_by_transaction(
+        "shared-provider-reference", principal=org_a
+    ).organization_id == "org-a"
+    assert store.find_by_transaction(
+        "shared-provider-reference", principal=org_b
+    ).organization_id == "org-b"
 
 
 def test_asserted_actor_cannot_differ_from_verified_subject(tmp_path):
@@ -130,7 +170,7 @@ def test_verified_identity_cannot_claim_a_legacy_unscoped_case(tmp_path):
             "UPDATE cases SET organization_id = 'legacy-unscoped' WHERE case_id = ?",
             (case.case_id,),
         )
-    with pytest.raises(AuthorizationError, match="no verified organization owner"):
+    with pytest.raises(CaseNotFound):
         store.get_case(case.case_id, principal=identity)
 
 

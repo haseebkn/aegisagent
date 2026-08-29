@@ -33,6 +33,7 @@ from sklearn.metrics import (average_precision_score, classification_report,
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import ARTIFACTS_DIR, DB_PATH
+from scripts.model_registry import import_existing_champion, register_version
 from scripts.modeling import fit_stacked_ensemble, score_base_models
 
 
@@ -44,7 +45,7 @@ def chronological_split(df, fractions=(0.70, 0.15, 0.15)):
     return df.iloc[:c1].copy(), df.iloc[c1:c2].copy(), df.iloc[c2:].copy()
 
 
-def prune_old_versions(artifacts_dir, keep):
+def prune_old_versions(artifacts_dir, keep, protected=()):
     """Delete superseded version directories, newest-first.
 
     Each training run writes ~230 MB of joblib into a new v_<timestamp>/ directory.
@@ -57,9 +58,11 @@ def prune_old_versions(artifacts_dir, keep):
     Artifacts are reproducible from code plus data, so retention is a convenience
     for rollback rather than a safety net.
     """
+    protected = set(protected)
     versions = sorted((d for d in artifacts_dir.glob("v_*") if d.is_dir()),
                       key=lambda d: d.name, reverse=True)
-    stale = versions[keep:]
+    unprotected = [directory for directory in versions if directory.name not in protected]
+    stale = unprotected[keep:]
     if not stale:
         return []
     for d in stale:
@@ -70,9 +73,9 @@ def prune_old_versions(artifacts_dir, keep):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--keep", type=int, default=1,
-        help="Version directories to retain after training (default 1: the one just "
-             "trained). Raise it if you want previous versions available to roll back to.")
+        "--keep", type=int, default=2,
+        help="Unprotected version directories to retain after training. The champion "
+             "and active candidates are always retained.")
     parser.add_argument(
         "--unlock-final-evaluation", action="store_true",
         help="Score the prospectively locked tail window. Run only after feature and "
@@ -247,12 +250,26 @@ def main():
         },
     }
     (versioned_dir / "training_metrics.json").write_text(json.dumps(metrics_payload, indent=4))
-    (ARTIFACTS_DIR / "latest_version.txt").write_text(version_str)
-
     print(f"Metrics saved to {versioned_dir / 'training_metrics.json'}")
-    print(f"latest_version.txt now points at {version_str}")
+    registry = import_existing_champion(artifacts_dir=ARTIFACTS_DIR)
+    registry = register_version(
+        version_str,
+        artifacts_dir=ARTIFACTS_DIR,
+        bootstrap_champion=registry["champion"] is None,
+    )
+    if registry["champion"] == version_str:
+        print(f"Bootstrapped {version_str} as the first champion.")
+    else:
+        print(
+            f"Registered {version_str} as a challenger; serving remains on "
+            f"{registry['champion']} until an authorized promotion."
+        )
 
-    removed = prune_old_versions(ARTIFACTS_DIR, max(args.keep, 1))
+    protected = {
+        version for version, record in registry["versions"].items()
+        if record["status"] in {"champion", "candidate"}
+    }
+    removed = prune_old_versions(ARTIFACTS_DIR, max(args.keep, 0), protected)
     if removed:
         print(f"Pruned {len(removed)} superseded version(s): {', '.join(removed)}")
     kept = sorted(d.name for d in ARTIFACTS_DIR.glob("v_*") if d.is_dir())

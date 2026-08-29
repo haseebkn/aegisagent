@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.0 — 2026-08-29
+
+Phase 6 adds governed champion/challenger operations and a deliberately non-training
+analyst-feedback report.
+
+- Changed training so a new version is registered as a candidate instead of silently
+  replacing the serving pointer. The first model bootstraps the registry only when no
+  champion exists.
+- Added artifact manifests and a hash-chained model-governance event history covering
+  registration, paired comparison, human promotion, and controlled rollback.
+- Added paired calendar-day bootstrap comparison on the common development window,
+  with explicit PR-AUC non-inferiority, recall, calibration, and alert-capacity gates.
+- Required an authorized `model_governance_reviewer`, identified actor, rationale,
+  passing hash-registered report, unchanged artifacts, and unchanged champion before
+  atomic promotion.
+- Added fail-closed serving when the registry champion and version pointer disagree.
+- Added organization-scoped aggregate analyst-disposition reporting with small-cohort
+  suppression and an explicit prohibition on treating RGS decisions as fraud labels.
+- Added governance tests for silent replacement, eligibility, artifact/report/registry
+  tampering, role separation, rollback, paired degradation, feedback semantics, and
+  serving-pointer consistency.
+- Moved comparison, promotion, and rollback authorization into the registry domain;
+  direct module calls now require an authorized security principal.
+- Recompute eligibility from finite metrics, current artifact manifests, the locked
+  development-holdout designation, and the fixed promotion policy before registering
+  a comparison report.
+- Replaced implicit all-permission roles with explicit grants and separated trusted
+  model-output ingestion from interactive investigator and RGS-review identities.
+- Scoped transaction uniqueness and identifier lookup by organization, including a
+  migration for databases created with the earlier global constraint.
+- Corrected the Compose AWS credential mount to the fixed non-root runtime user's home.
+
 ## 0.6.0 — 2026-08-29
 
 Phase 5 introduces a testable HTTP service boundary around the existing human-review

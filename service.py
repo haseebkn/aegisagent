@@ -37,9 +37,12 @@ from scripts.privacy import safe_error_message
 from scripts.security import (
     AuthMode,
     AuthenticationRequired,
+    Permission,
+    PermissionDenied,
     SecurityPrincipal,
     auth_mode,
     local_development_principal,
+    require_permission,
 )
 
 PrincipalResolver = Callable[[Request], SecurityPrincipal]
@@ -91,7 +94,7 @@ def create_app(
 
     app = FastAPI(
         title="AegisAgent Case Service",
-        version="0.6.0",
+        version="0.7.0",
         description=(
             "Human-review case workflow for model-generated fraud alerts. "
             "This API does not file or submit regulatory reports."
@@ -125,6 +128,10 @@ def create_app(
 
     @app.exception_handler(AuthorizationError)
     async def authorization_error(request: Request, _exc: AuthorizationError):
+        return _problem(request, status.HTTP_403_FORBIDDEN, "permission_denied", "Operation denied.")
+
+    @app.exception_handler(PermissionDenied)
+    async def permission_error(request: Request, _exc: PermissionDenied):
         return _problem(request, status.HTTP_403_FORBIDDEN, "permission_denied", "Operation denied.")
 
     @app.exception_handler(CaseNotFound)
@@ -173,6 +180,12 @@ def create_app(
     def store(identity: SecurityPrincipal) -> CaseStore:
         return CaseStore(app.state.case_db_path, principal=identity)
 
+    def verified_alert_ingestor(
+        identity: SecurityPrincipal = Depends(principal),
+    ) -> SecurityPrincipal:
+        require_permission(identity, Permission.INGEST_ALERT)
+        return identity
+
     @app.get("/health/live", tags=["health"])
     def live():
         return {"status": "ok"}
@@ -199,7 +212,10 @@ def create_app(
         )
 
     @app.post("/v1/cases", status_code=status.HTTP_201_CREATED, tags=["cases"])
-    def create_case(body: AlertCreate, identity: SecurityPrincipal = Depends(principal)):
+    def create_case(
+        body: AlertCreate,
+        identity: SecurityPrincipal = Depends(verified_alert_ingestor),
+    ):
         record = store(identity).create_alert_case(
             trans_num=body.trans_num,
             model_score=body.model_score,

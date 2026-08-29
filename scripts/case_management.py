@@ -205,7 +205,7 @@ class CaseStore:
                 """
                 CREATE TABLE IF NOT EXISTS cases (
                     case_id TEXT PRIMARY KEY,
-                    trans_num TEXT NOT NULL UNIQUE,
+                    trans_num TEXT NOT NULL,
                     model_score REAL NOT NULL CHECK(model_score >= 0 AND model_score <= 1),
                     threshold REAL NOT NULL CHECK(threshold >= 0 AND threshold <= 1),
                     model_version TEXT NOT NULL,
@@ -216,7 +216,8 @@ class CaseStore:
                     assigned_to TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    version INTEGER NOT NULL CHECK(version >= 1)
+                    version INTEGER NOT NULL CHECK(version >= 1),
+                    UNIQUE(organization_id, trans_num)
                 );
 
                 CREATE TABLE IF NOT EXISTS case_events (
@@ -280,6 +281,64 @@ class CaseStore:
                 "WHERE organization_id IS NULL OR TRIM(organization_id) = ''",
                 (LEGACY_UNSCOPED_ORGANIZATION,),
             )
+            self._migrate_global_transaction_uniqueness(con)
+
+    @staticmethod
+    def _migrate_global_transaction_uniqueness(con: sqlite3.Connection) -> None:
+        """Replace the pre-tenant global transaction constraint with an org-scoped one."""
+        has_global_unique = False
+        for index in con.execute("PRAGMA index_list(cases)").fetchall():
+            if not index[2]:
+                continue
+            columns = [
+                row[2]
+                for row in con.execute(f"PRAGMA index_info('{index[1]}')").fetchall()
+            ]
+            if columns == ["trans_num"]:
+                has_global_unique = True
+                break
+        if not has_global_unique:
+            return
+
+        con.commit()
+        con.execute("PRAGMA foreign_keys = OFF")
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute(
+                """CREATE TABLE cases_tenant_scoped (
+                    case_id TEXT PRIMARY KEY,
+                    trans_num TEXT NOT NULL,
+                    model_score REAL NOT NULL CHECK(model_score >= 0 AND model_score <= 1),
+                    threshold REAL NOT NULL CHECK(threshold >= 0 AND threshold <= 1),
+                    model_version TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'alert_open', 'under_review', 'rgs_not_reached', 'rgs_reached'
+                    )),
+                    assigned_to TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version >= 1),
+                    UNIQUE(organization_id, trans_num)
+                )"""
+            )
+            con.execute(
+                """INSERT INTO cases_tenant_scoped
+                   SELECT case_id, trans_num, model_score, threshold, model_version,
+                          organization_id, status, assigned_to, created_at, updated_at, version
+                   FROM cases"""
+            )
+            con.execute("DROP TABLE cases")
+            con.execute("ALTER TABLE cases_tenant_scoped RENAME TO cases")
+            con.execute("CREATE INDEX idx_cases_status ON cases(status, updated_at)")
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.execute("PRAGMA foreign_keys = ON")
+        if con.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise sqlite3.IntegrityError("Tenant uniqueness migration broke a foreign key")
 
     def _identity(
         self,
@@ -389,7 +448,7 @@ class CaseStore:
             actor_role=actor_role,
         )
         actor = identity.subject
-        role = _role(role_value)
+        role = role_value
         if not math.isfinite(model_score) or not math.isfinite(threshold):
             raise ValidationError("model_score and threshold must be finite")
         if not 0 <= threshold <= 1 or not 0 <= model_score <= 1:
@@ -420,7 +479,7 @@ class CaseStore:
             from_status=None,
             to_status=CaseStatus.ALERT_OPEN.value,
             actor=actor,
-            actor_role=role.value,
+            actor_role=role,
             rationale=rationale,
             metadata_json=metadata_json,
             occurred_at=timestamp,
@@ -443,44 +502,60 @@ class CaseStore:
                         actor, actor_role, rationale, metadata_json, occurred_at,
                         previous_event_hash, event_hash)
                        VALUES (?, ?, 1, 'alert_created', NULL, ?, ?, ?, ?, ?, ?, '', ?)""",
-                    (event_id, case_id, CaseStatus.ALERT_OPEN.value, actor, role.value,
+                    (event_id, case_id, CaseStatus.ALERT_OPEN.value, actor, role,
                      rationale, metadata_json, timestamp, event_hash),
                 )
         except sqlite3.IntegrityError as exc:
             if "trans_num" in str(exc) or "UNIQUE constraint failed: cases.trans_num" in str(exc):
                 raise DuplicateAlert(f"A case already exists for transaction {trans_num}") from exc
             raise
-        return self.get_case(case_id, principal=identity)
+        return CaseRecord(
+            case_id=case_id,
+            trans_num=trans_num,
+            model_score=model_score,
+            threshold=threshold,
+            model_version=model_version,
+            organization_id=identity.organization_id,
+            status=CaseStatus.ALERT_OPEN.value,
+            assigned_to=None,
+            created_at=timestamp,
+            updated_at=timestamp,
+            version=1,
+        )
 
     def get_case(
         self, case_id: str, *, principal: SecurityPrincipal | None = None
     ) -> CaseRecord:
+        identity, _ = self._identity(Permission.READ_CASE, principal=principal)
+        organizations = [identity.organization_id]
+        if identity.provider == "local-development":
+            organizations.append(LEGACY_UNSCOPED_ORGANIZATION)
+        placeholders = ",".join("?" for _ in organizations)
         with self._connect() as con:
-            row = con.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
+            row = con.execute(
+                f"SELECT * FROM cases WHERE case_id = ? AND organization_id IN ({placeholders})",
+                (case_id, *organizations),
+            ).fetchone()
         if row is None:
             raise CaseNotFound(f"Unknown case: {case_id}")
-        case = self._case(row)
-        self._identity(
-            Permission.READ_CASE,
-            principal=principal,
-            resource_organization_id=case.organization_id,
-        )
-        return case
+        return self._case(row)
 
     def find_by_transaction(
         self, trans_num: str, *, principal: SecurityPrincipal | None = None
     ) -> CaseRecord | None:
+        identity, _ = self._identity(Permission.READ_CASE, principal=principal)
+        organizations = [identity.organization_id]
+        if identity.provider == "local-development":
+            organizations.append(LEGACY_UNSCOPED_ORGANIZATION)
+        placeholders = ",".join("?" for _ in organizations)
         with self._connect() as con:
-            row = con.execute("SELECT * FROM cases WHERE trans_num = ?", (trans_num,)).fetchone()
+            row = con.execute(
+                f"SELECT * FROM cases WHERE trans_num = ? AND organization_id IN ({placeholders})",
+                (trans_num, *organizations),
+            ).fetchone()
         if row is None:
             return None
-        case = self._case(row)
-        self._identity(
-            Permission.READ_CASE,
-            principal=principal,
-            resource_organization_id=case.organization_id,
-        )
-        return case
+        return self._case(row)
 
     def list_cases(
         self,

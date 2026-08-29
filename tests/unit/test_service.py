@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from scripts.security import (
+    ALERT_INGESTOR,
     AUTHORIZED_RGS_REVIEWER,
     INVESTIGATOR,
     principal_from_verified_claims,
@@ -8,10 +9,11 @@ from scripts.security import (
 from service import create_app
 
 
-def identity(subject="investigator-1", role=INVESTIGATOR, organization="org-a"):
+def identity(subject="investigator-1", role=None, organization="org-a"):
+    roles = [INVESTIGATOR, ALERT_INGESTOR] if role is None else [role]
     return principal_from_verified_claims(
         subject=subject,
-        roles=[role],
+        roles=roles,
         provider="test-idp",
         organization_id=organization,
         session_id=f"session-{subject}",
@@ -117,7 +119,7 @@ def test_cross_organization_case_is_not_exposed(tmp_path):
     case = create_case(owner_api)
     outsider_api = client(tmp_path, identity("outsider-1", organization="org-b"))
     response = outsider_api.get(f"/v1/cases/{case['case_id']}")
-    assert response.status_code == 403
+    assert response.status_code == 404
     assert "org-a" not in response.text
 
 
@@ -196,6 +198,26 @@ def test_production_without_verified_adapter_is_not_ready(tmp_path, monkeypatch)
 def test_openapi_describes_the_case_service_boundary(tmp_path):
     api = client(tmp_path, identity())
     schema = api.get("/openapi.json").json()
-    assert schema["info"]["version"] == "0.6.0"
+    assert schema["info"]["version"] == "0.7.0"
     assert "/v1/cases/{case_id}/rgs-decision" in schema["paths"]
     assert not any("submit" in path or "file" in path for path in schema["paths"])
+
+
+def test_case_creation_requires_verified_alert_ingestor_role(tmp_path):
+    api = client(tmp_path, identity(role=INVESTIGATOR))
+    response = api.post(
+        "/v1/cases",
+        json={
+            "trans_num": "untrusted-alert",
+            "model_score": 0.99,
+            "threshold": 0.1,
+            "model_version": "invented-version",
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "permission_denied"
+
+    ingestor_api = client(tmp_path, identity("ingestor-1", role=ALERT_INGESTOR))
+    assert create_case(ingestor_api, "trusted-ingestor-alert")["trans_num"] == (
+        "trusted-ingestor-alert"
+    )

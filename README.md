@@ -84,8 +84,20 @@ production fails closed until Clerk is integrated. No state represents filing or
 Identity resolution is injected per request, route handlers delegate authorization to
 the same domain policy used by Streamlit and the CLI, and stale writes return an
 explicit conflict. Liveness is public; readiness fails in production until a verified
-identity adapter is installed. There is deliberately no filing/submission endpoint.
+identity adapter is installed. HTTP alert creation requires the dedicated
+`alert_ingestor` service role, so interactive investigators cannot submit arbitrary
+scores as verified model output. There is deliberately no filing/submission endpoint.
 See [docs/service-architecture.md](docs/service-architecture.md).
+
+**Model-governance layer.** Phase 6 stops training from silently replacing the served
+model. New artifacts are hash-registered as challengers, compared with the champion on
+the same chronological development holdout using a paired day-block bootstrap, and
+checked for ranking, recall, calibration, and alert-capacity non-inferiority. Promotion
+requires a `model_governance_reviewer`, a rationale, an unchanged champion and
+candidate manifest, and a policy-and-metric-validated passing report; rollback is
+equally explicit and audited. Authorization is enforced in the registry domain as well
+as the CLI. See
+[docs/model-governance.md](docs/model-governance.md).
 
 **Narrative layer.** Narrative drafting is available only while a case is under human
 review. The threshold creates an investigation alert, not an RGS determination or
@@ -143,6 +155,23 @@ AEGIS_SECURITY_MODE=development uvicorn service:app --reload
 OpenAPI is available at `http://127.0.0.1:8000/docs`. Docker Compose starts the same
 development service on port 8000. Do not place it on a public network: production
 readiness intentionally fails until the later Clerk adapter verifies every request.
+
+Training now bootstraps a champion only in an empty artifact store. Later runs produce
+challengers and leave serving unchanged:
+
+```bash
+# Use a dedicated local governance identity; production still requires Clerk.
+AEGIS_DEV_ROLES=model_governance_reviewer python scripts/model_ops.py status
+AEGIS_DEV_ROLES=model_governance_reviewer python scripts/model_ops.py compare --candidate v_YYYYMMDD_HHMMSS
+AEGIS_DEV_ROLES=model_governance_reviewer python scripts/model_ops.py promote \
+  --candidate v_YYYYMMDD_HHMMSS \
+  --rationale "Candidate passed the approved development governance gates."
+AEGIS_DEV_ROLES=model_governance_reviewer python scripts/operational_feedback.py \
+  --output reports/operational_feedback.json
+```
+
+PowerShell uses `$env:AEGIS_DEV_ROLES='model_governance_reviewer'` before these
+commands. The feedback report contains aggregate RGS dispositions, not fraud labels.
 
 Every path is env-overridable (`DBT_DB_PATH`, `MODELS_ARTIFACTS_DIR`,
 `COMPLIANCE_LOGS_DIR`, `AEGIS_CASE_DB_PATH`, `AEGIS_EVIDENCE_DIR`,
@@ -239,7 +268,7 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 | Job | What it does |
 |---|---|
 | Lint | `ruff check` on correctness rules only (F, E9, W6). Exists because dead code accumulated twice, including a function renamed at its definition but not its call site — which no test could catch, since nothing imports it. |
-| Unit tests | 124 pytest cases over the HTTP service contract, authentication modes, deny-by-default authorization, organization isolation/integrity and legacy migration, prompt minimization, secret redaction, CI permissions/action runtimes, container hardening, PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, fixture stability, and path resolution. |
+| Unit tests | 135 pytest cases over model-governance authorization and report validation, paired comparison, operational-feedback semantics, trusted alert ingestion, the HTTP service contract, authentication modes, deny-by-default authorization, tenant-scoped transaction identity and legacy migration, prompt minimization, secret redaction, CI permissions/action runtimes, container hardening, PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, fixture stability, and path resolution. |
 | dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`), runs the **real** dbt models and data tests against it — no 500 MB download — then runs the drift gate. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
 | Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard: `.dockerignore` once excluded `models/`, `models_artifacts/` and the DuckDB file, and `docker-compose` bind-mounted the repo over `/app`, hiding it. |
@@ -309,10 +338,15 @@ Read this before drawing conclusions from the metrics above.
 - **The meta-score is overconfident in the alerting region** by 10 points on
   development and 17 points on the locked tail. It is
   usable as a ranking; it should not be read as a probability until calibrated.
-- **No champion/challenger evaluation and no analyst feedback loop.** Drift is
-  monitored and gated in CI, but there is no mechanism to compare a candidate model
-  against the incumbent, and no path for investigator dispositions to feed back into
-  evaluation. Both are prerequisites for anything operational.
+- **Champion/challenger governance remains local.** Phase 6 prevents silent replacement,
+  compares candidates with paired development-window gates, records human promotion,
+  and supports rollback. The registry is a local hash chain, not a managed registry or
+  independent trust anchor; there is no shadow traffic, canary, production monitor, or
+  automatic rollback. Development non-inferiority is not external validation.
+- **Analyst feedback is operational, not ground truth.** Aggregate RGS dispositions and
+  review time can be compared by model version with small-cohort suppression. They are
+  explicitly blocked from training-label use because RGS is not fraud, reviewed alerts
+  are selected by the model, and disposition context is incomplete in the feature mart.
 - **Nothing is actually deployed.** CI builds and verifies the image on every push,
   but promotion to AWS is a manual `deploy.sh` run, and the ECS service is defined
   with `desired_count = 0` — the local API exists, but the infrastructure is not
@@ -353,6 +387,7 @@ docs/
   evidence-integrity.md    Phase 3 preservation, receipts, verification, and limits
   security-privacy.md      Phase 4A identity, authorization, privacy, and Clerk seam
   service-architecture.md  Phase 5 HTTP contracts, readiness, errors, and limits
+  model-governance.md      Phase 6 candidate comparison, promotion, rollback, feedback
   graph-features.md        entity/graph layer: built, measured, and rejected
   target-encoding.md       causal encodings, bounded card history, and drift references
   materialization.md       why incremental materialization was measured and rejected
@@ -374,6 +409,10 @@ scripts/
   drift.py             PSI + KS between training and scoring windows
   graph_signal.py      bipartite graph density and univariate feature power
   verify_pipeline.py   end-to-end verification
+  model_registry.py    artifact manifests + hash-chained champion/challenger registry
+  model_comparison.py  paired development-window promotion gates
+  model_ops.py         governed compare/promote/rollback/status CLI
+  operational_feedback.py aggregate disposition monitoring (never training labels)
   audit_phase1.py      standalone data/artifact audit
 tests/
   *.sql                dbt singular tests (causality, evaluation lock, skew, scale)
@@ -403,5 +442,8 @@ request/error contracts, request-scoped principal injection, and separate livene
 fail-closed readiness. It is locally runnable, not publicly deployed. See
 [docs/security-privacy.md](docs/security-privacy.md) and
 [docs/service-architecture.md](docs/service-architecture.md). The next priorities are
-champion/challenger operations and, once the application boundary is otherwise ready,
-Clerk integration and production deployment hardening.
+[docs/service-architecture.md](docs/service-architecture.md). Phase 6 (`0.7.0`) adds
+candidate registration, paired champion comparison, authorized promotion, rollback,
+and aggregate analyst-disposition monitoring. Once the remaining application boundary
+is ready, the next priorities are Clerk integration and production deployment,
+observability, persistence, and recovery hardening.

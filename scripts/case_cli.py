@@ -19,7 +19,7 @@ from scripts.case_management import (
     evidence_to_dict,
     event_to_dict,
 )
-from scripts.security import AuthenticationRequired, local_development_principal
+from scripts.security import ALERT_INGESTOR, AuthenticationRequired, local_development_principal
 
 
 def _role(value: str) -> ReviewerRole:
@@ -78,9 +78,12 @@ def main() -> None:
     args = build_parser().parse_args()
     requested_role = getattr(args, "role", None)
     try:
+        roles = [requested_role.value] if requested_role is not None else None
+        if args.command == "create":
+            roles = list(roles or [ReviewerRole.INVESTIGATOR.value]) + [ALERT_INGESTOR]
         principal = local_development_principal(
             subject=getattr(args, "actor", None),
-            roles=[requested_role.value] if requested_role is not None else None,
+            roles=roles,
         )
     except AuthenticationRequired as exc:
         raise SystemExit(f"AUTHENTICATION_REQUIRED: {exc}") from exc

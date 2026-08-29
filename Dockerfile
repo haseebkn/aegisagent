@@ -8,7 +8,7 @@ WORKDIR /app
 
 # Fixed, non-root runtime identity. Package installation remains the only root step.
 RUN groupadd --gid 10001 aegis \
-    && useradd --uid 10001 --gid aegis --no-create-home --shell /usr/sbin/nologin aegis
+    && useradd --uid 10001 --gid aegis --create-home --shell /usr/sbin/nologin aegis
 
 # Dependencies first so application edits do not bust the layer cache.
 COPY requirements.txt .

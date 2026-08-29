@@ -39,11 +39,24 @@ class Permission(str, Enum):
     ATTACH_EVIDENCE = "case:attach_evidence"
     RECORD_RGS_DECISION = "case:record_rgs_decision"
     VERIFY_INTEGRITY = "case:verify_integrity"
+    COMPARE_MODELS = "model:compare"
+    PROMOTE_MODEL = "model:promote"
+    EXPORT_OPERATIONAL_FEEDBACK = "model:export_operational_feedback"
+    INGEST_ALERT = "alert:ingest_verified_model_output"
 
 
 INVESTIGATOR = "investigator"
 AUTHORIZED_RGS_REVIEWER = "authorized_rgs_reviewer"
-SUPPORTED_ROLES = frozenset({INVESTIGATOR, AUTHORIZED_RGS_REVIEWER})
+MODEL_GOVERNANCE_REVIEWER = "model_governance_reviewer"
+ALERT_INGESTOR = "alert_ingestor"
+SUPPORTED_ROLES = frozenset(
+    {
+        INVESTIGATOR,
+        AUTHORIZED_RGS_REVIEWER,
+        MODEL_GOVERNANCE_REVIEWER,
+        ALERT_INGESTOR,
+    }
+)
 LEGACY_UNSCOPED_ORGANIZATION = "legacy-unscoped"
 
 ROLE_PERMISSIONS = {
@@ -56,7 +69,30 @@ ROLE_PERMISSIONS = {
             Permission.VERIFY_INTEGRITY,
         }
     ),
-    AUTHORIZED_RGS_REVIEWER: frozenset(Permission),
+    AUTHORIZED_RGS_REVIEWER: frozenset(
+        {
+            Permission.READ_CASE,
+            Permission.CREATE_ALERT,
+            Permission.START_REVIEW,
+            Permission.ATTACH_EVIDENCE,
+            Permission.RECORD_RGS_DECISION,
+            Permission.VERIFY_INTEGRITY,
+        }
+    ),
+    MODEL_GOVERNANCE_REVIEWER: frozenset(
+        {
+            Permission.READ_CASE,
+            Permission.COMPARE_MODELS,
+            Permission.PROMOTE_MODEL,
+            Permission.EXPORT_OPERATIONAL_FEEDBACK,
+        }
+    ),
+    ALERT_INGESTOR: frozenset(
+        {
+            Permission.CREATE_ALERT,
+            Permission.INGEST_ALERT,
+        }
+    ),
 }
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{1,127}$")

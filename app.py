@@ -24,6 +24,7 @@ from scripts.pii import mask_pan
 from scripts.privacy import safe_error_message
 from scripts.sar_agent import generate_sar_narrative, save_sar_report
 from scripts.security import (
+    ALERT_INGESTOR,
     AuthMode,
     AuthenticationRequired,
     SecurityError,
@@ -342,7 +343,9 @@ reviewer_role = st.sidebar.selectbox(
     help="Development-only identity selection; this provider is disabled in production mode.",
 )
 try:
-    security_principal = local_development_principal(roles=[reviewer_role])
+    security_principal = local_development_principal(
+        roles=[reviewer_role, ALERT_INGESTOR]
+    )
 except AuthenticationRequired as exc:
     st.error(f"Authentication unavailable: {safe_error_message(exc)}")
     st.stop()

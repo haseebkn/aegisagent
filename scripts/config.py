@@ -5,6 +5,7 @@ root*, so the same code runs from a developer checkout, a container, or an ECS
 task without the `if not os.path.exists('e:/AegisAgent/...')` fallbacks that used
 to be copy-pasted across six modules.
 """
+import json
 import os
 from pathlib import Path
 
@@ -18,6 +19,11 @@ def _resolve(env_var: str, default_rel: str) -> Path:
 
 DB_PATH = _resolve("DBT_DB_PATH", "aegis_db.duckdb")
 ARTIFACTS_DIR = _resolve("MODELS_ARTIFACTS_DIR", "models_artifacts")
+MODEL_REGISTRY_PATH = (
+    Path(os.environ["AEGIS_MODEL_REGISTRY_PATH"])
+    if os.environ.get("AEGIS_MODEL_REGISTRY_PATH")
+    else ARTIFACTS_DIR / "registry.json"
+)
 COMPLIANCE_LOGS_DIR = _resolve("COMPLIANCE_LOGS_DIR", "compliance_logs")
 CASE_DB_PATH = _resolve("AEGIS_CASE_DB_PATH", "compliance_logs/cases.sqlite3")
 EVIDENCE_DIR = _resolve("AEGIS_EVIDENCE_DIR", "compliance_logs/evidence")
@@ -53,6 +59,20 @@ def resolve_model_dir(artifacts_dir=None) -> Path:
     pointer = base / "latest_version.txt"
     if pointer.exists():
         version = pointer.read_text().strip()
+        registry_path = (
+            MODEL_REGISTRY_PATH if base == ARTIFACTS_DIR else base / "registry.json"
+        )
+        if registry_path.exists():
+            try:
+                registered_champion = json.loads(
+                    registry_path.read_text(encoding="utf-8")
+                ).get("champion")
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError("Model registry is unreadable; refusing to serve") from exc
+            if registered_champion != version:
+                raise RuntimeError(
+                    "Serving pointer and governed champion disagree; refusing to serve"
+                )
         candidate = base / version
         if not candidate.exists():
             raise FileNotFoundError(

@@ -24,7 +24,7 @@ services:
       # broken image fails here instead of being papered over by a bind mount.
       - ./aegis_db.duckdb:/app/aegis_db.duckdb
       - ./compliance_logs:/app/compliance_logs
-      - ~/.aws:/root/.aws:ro
+      - ~/.aws:/home/aegis/.aws:ro
     networks:
       - aegis_net
     healthcheck:

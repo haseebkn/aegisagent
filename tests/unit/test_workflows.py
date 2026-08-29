@@ -77,9 +77,13 @@ def test_ci_uses_read_only_token_and_node24_action_generations():
 
 def test_container_defaults_to_non_root_fail_closed_runtime():
     dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
     assert "FROM python:3.11-slim@sha256:" in dockerfile
     assert "AEGIS_SECURITY_MODE=production" in dockerfile
+    assert "--create-home" in dockerfile
     assert "USER aegis" in dockerfile
+    assert "/home/aegis/.aws" in compose
+    assert "/root/.aws" not in compose
     for excluded in (".env", ".aws/", "*credentials*", "*.pem"):
         assert excluded in dockerignore

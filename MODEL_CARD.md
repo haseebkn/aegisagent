@@ -1,6 +1,6 @@
 # AegisAgent model card
 
-**Version:** 0.6.0
+**Version:** 0.7.0
 
 **Status:** portfolio/research baseline
 
@@ -95,8 +95,9 @@ false-negative loss. It is not institution-specific economics.
   with few positives. They are diagnostic, not a fairness certification.
 - Drift has zero significant, one moderate, and 18 stable features. The moderate
   feature is 90-day card transaction count (PSI 0.1705).
-- No external validation, analyst feedback loop, champion/challenger operation, or
-  causal estimate of intervention benefit exists.
+- No external validation or causal estimate of intervention benefit exists. Phase 6
+  adds local champion/challenger governance and aggregate disposition monitoring, but
+  neither is evidence of production effectiveness.
 
 ## Regulatory and human-oversight limitations
 
@@ -115,6 +116,16 @@ report—it hands off to an approved reporting workflow outside this project.
 Phase 5 places this same domain workflow behind a versioned local HTTP API. The API
 does not add a model claim or regulatory capability: it provides transport contracts,
 request-scoped identity injection, concurrency responses, and health semantics only.
+HTTP alert creation requires the dedicated `alert_ingestor` service role; investigator
+and RGS-review identities cannot submit caller-selected scores as verified model output.
+
+Phase 6 compares a candidate and champion on the same development holdout with a
+paired calendar-day bootstrap and operating-policy gates. Passing those gates does not
+promote automatically: a model-governance reviewer must provide a rationale, and the
+registry verifies artifact manifests, comparison metrics and policy gates, and report
+hashes before changing the serving pointer. These checks live in the registry domain,
+not only in its command-line wrapper.
+This is a local governance demonstration, not independent validation.
 
 The optional LLM output is an unapproved narrative draft available during active
 human review. Numeric grounding reduces
@@ -145,6 +156,11 @@ a checksum and VersionId are returned; the Terraform retention value is illustra
 not a compliance opinion. HTML rendering, encryption-key governance, recovery,
 retention approval, full production authentication, and access monitoring require hardening. It must use synthetic data
 only in its current state.
+
+Aggregate terminal RGS dispositions can be reported by model version for operational
+monitoring. They are explicitly marked ineligible as model-training labels: RGS is not
+the synthetic fraud target, reviewed alerts are selection-biased, and dispositions
+depend on contextual evidence unavailable to the model.
 
 Nothing serves production traffic. Streamlit and the Phase 5 case API run locally.
 The image retains the verifier as its default command, while Docker Compose can start
