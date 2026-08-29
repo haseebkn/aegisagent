@@ -10,6 +10,10 @@ services:
       - AEGIS_RAW_DATA_DIR=/app
       - MODELS_ARTIFACTS_DIR=/app/models_artifacts
       - COMPLIANCE_LOGS_DIR=/app/compliance_logs
+      # The local identity provider is intentionally unavailable in production mode.
+      - AEGIS_SECURITY_MODE=development
+      - AEGIS_DEV_SUBJECT=${AEGIS_DEV_SUBJECT:-local-investigator}
+      - AEGIS_DEV_ORGANIZATION=${AEGIS_DEV_ORGANIZATION:-local-demo}
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
       - COMPLIANCE_S3_BUCKET=${COMPLIANCE_S3_BUCKET:-}
     volumes:

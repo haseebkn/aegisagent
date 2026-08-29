@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from scripts.config import EVIDENCE_DIR
+from scripts.privacy import safe_error_message
 
 
 class EvidenceError(RuntimeError):
@@ -73,6 +74,7 @@ class EvidenceStore:
     def __init__(self, root: str | Path = EVIDENCE_DIR):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.root, 0o700)
 
     def preserve_text(
         self,
@@ -89,6 +91,7 @@ class EvidenceStore:
         digest = sha256_bytes(payload)
         case_dir = self.root / case_segment
         case_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(case_dir, 0o700)
         destination = case_dir / f"{type_segment}-{digest}.txt"
 
         if destination.exists():
@@ -106,6 +109,7 @@ class EvidenceStore:
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(temporary_path, destination)
+                os.chmod(destination, 0o600)
             finally:
                 if temporary_path is not None and temporary_path.exists():
                     temporary_path.unlink()
@@ -129,7 +133,7 @@ class EvidenceStore:
                     "bucket": archive_bucket,
                     "verified": False,
                     "error_type": type(exc).__name__,
-                    "error": str(exc),
+                    "error": safe_error_message(exc),
                     "attempted_at": _now(),
                 }
             receipt = EvidenceReceipt(**{**asdict(receipt), "archive_receipt": archive})
@@ -157,6 +161,7 @@ def archive_to_s3(
         ContentType=receipt.media_type,
         ChecksumAlgorithm="SHA256",
         ChecksumSHA256=checksum,
+        ServerSideEncryption="AES256",
         Metadata={
             "sha256": receipt.sha256,
             "evidence-id": receipt.evidence_id,

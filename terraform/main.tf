@@ -240,6 +240,27 @@ resource "aws_cloudwatch_log_group" "logs" {
   retention_in_days = 1827
 }
 
+# Refuse plaintext transport even if a future caller constructs an HTTP S3 URL.
+resource "aws_s3_bucket_policy" "require_tls" {
+  bucket = aws_s3_bucket.compliance_lake.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "DenyInsecureTransport"
+      Effect    = "Deny"
+      Principal = "*"
+      Action    = "s3:*"
+      Resource = [
+        aws_s3_bucket.compliance_lake.arn,
+        "${aws_s3_bucket.compliance_lake.arn}/*"
+      ]
+      Condition = {
+        Bool = { "aws:SecureTransport" = "false" }
+      }
+    }]
+  })
+}
+
 resource "aws_ecs_task_definition" "pipeline_task" {
   family                   = "${var.project_name}-task"
   network_mode             = "awsvpc"
@@ -270,6 +291,9 @@ resource "aws_ecs_task_definition" "pipeline_task" {
       # load any model.
       { name = "MODELS_ARTIFACTS_DIR", value = "/app/models_artifacts" },
       { name = "COMPLIANCE_LOGS_DIR", value = "/app/compliance_logs" },
+      # Phase 4A fails closed until a verified Clerk (or equivalent) adapter supplies
+      # SecurityPrincipal objects. The local demo provider cannot run in this mode.
+      { name = "AEGIS_SECURITY_MODE", value = "production" },
       { name = "AEGIS_CASE_DB_PATH", value = "/app/compliance_logs/cases.sqlite3" },
       { name = "AEGIS_EVIDENCE_DIR", value = "/app/compliance_logs/evidence" },
       { name = "AEGIS_RAW_DATA_DIR", value = "/app" },

@@ -1,6 +1,6 @@
 # AegisAgent model card
 
-**Version:** 0.4.2
+**Version:** 0.5.0
 
 **Status:** portfolio/research baseline
 
@@ -127,15 +127,19 @@ the evidence.
 
 ## Privacy, security, and deployment limitations
 
-Names and PANs are masked before the Bedrock request, but location, occupation,
-gender, and other quasi-identifiers remain. The demo has no authentication or
-production RBAC: its reviewer identity and role are self-attested UI/CLI inputs. Its
-SQLite history is append-only through the application API and hash-verifiable, but is
+The Bedrock request uses a strict allowlist: PANs are masked, and names, demographics,
+occupation, address/postal data, and exact customer/merchant coordinates are excluded.
+This remains sensitive transaction data and is not anonymous. Phase 4A adds a
+provider-neutral identity contract, deny-by-default permissions, organization-scoped
+case access, and token-free identity audit metadata. The development identity provider
+is self-attested and cannot run in production mode; production remains unavailable
+until Clerk session verification is integrated. The SQLite history is append-only
+through the application API and hash-verifiable, but is
 not independently anchored or a compliant record archive. Local storage is not
 replicated or backed up. S3 archival is optional and is considered verified only when
 a checksum and VersionId are returned; the Terraform retention value is illustrative,
 not a compliance opinion. HTML rendering, encryption-key governance, recovery,
-retention approval, and access control require hardening. It must use synthetic data
+retention approval, full production authentication, and access monitoring require hardening. It must use synthetic data
 only in its current state.
 
 Nothing serves production traffic. Streamlit runs locally. The Docker image runs a

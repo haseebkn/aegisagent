@@ -31,8 +31,10 @@ model score -> alert -> authorized human review -> RGS not reached / RGS reached
 The Phase 2 prototype implements the alert, assignment, active-review, and human RGS
 disposition steps, plus an optional drafting aid. RGS disposition is role-gated in
 the application, requires a rationale, and is recorded in case history. The local
-demo does not authenticate the asserted identity or role. It does not implement
-Schedule 1 validation, reporting approval, authorized submission, confirmation
+demo uses a development-only identity provider; production mode fails closed until a
+verified provider adapter is integrated. The case layer enforces application permissions
+and organization scope, but Clerk login, MFA and session verification are deferred. It
+does not implement Schedule 1 validation, reporting approval, authorized submission, confirmation
 receipt, amendment, or regulatory record management.
 
 ## Terminology used in this repository
@@ -53,11 +55,12 @@ receipt, amendment, or regulatory record management.
 
 ## Data and privacy boundary
 
-PANs and names are masked before prompting, but the current prompt still includes
-gender, occupation, city, region, postal code, and exact customer and merchant
-coordinates. This is not de-identification. Any real implementation would require
-purpose limitation, data minimization, access controls, retention rules, audit logs,
-and a privacy/security review before external model use.
+The external narrative prompt uses a strict allowlist. It excludes names, gender,
+occupation, date of birth, street, city, region, postal code, and exact customer and
+merchant coordinates; the PAN is masked. This is data minimization, not
+de-identification. A real implementation still requires documented purpose limitation,
+approved retention/deletion rules, a privacy impact assessment, contractual/provider
+review, access monitoring, and security/privacy approval before external model use.
 
 ## Primary references
 

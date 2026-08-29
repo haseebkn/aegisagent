@@ -60,8 +60,12 @@ python scripts/case_cli.py show CASE-ID
 ## Honest boundary
 
 This is workflow logic, not a production case-management control. Reviewer identity
-and role are self-attested inputs; there is no login, directory integration, RBAC,
-maker-checker policy, or cryptographic signature. SQLite provides transactional local
+and role come from a provider-neutral security principal. The local demo provider is
+self-attested and is disabled when `AEGIS_SECURITY_MODE=production`; Clerk login and
+verified session integration remain deliberately deferred. Centralized deny-by-default
+authorization and organization scoping are implemented, but there is no production
+login, directory synchronization, MFA, session revocation, or step-up authentication.
+There is also no maker-checker policy or cryptographic signature. SQLite provides transactional local
 persistence, but the application event API is only logically append-only. Phase 3
 adds local hash-chain and evidence-file verification plus optional versioned S3
 receipts; neither is an independent trust anchor. The local database is not

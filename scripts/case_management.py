@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import os
 import sqlite3
 import uuid
 from dataclasses import asdict, dataclass
@@ -21,6 +22,15 @@ from typing import Any
 
 from scripts.config import CASE_DB_PATH
 from scripts.evidence import EvidenceReceipt, verify_file
+from scripts.security import (
+    LEGACY_UNSCOPED_ORGANIZATION,
+    Permission,
+    SecurityError,
+    SecurityPrincipal,
+    local_development_principal,
+    require_permission,
+    role_for_audit,
+)
 
 
 class CaseStatus(str, Enum):
@@ -73,6 +83,7 @@ class CaseRecord:
     model_score: float
     threshold: float
     model_version: str
+    organization_id: str | None
     status: str
     assigned_to: str | None
     created_at: str
@@ -169,10 +180,18 @@ def _event_digest(
 class CaseStore:
     """SQLite-backed case projection with an append-only application event history."""
 
-    def __init__(self, path: str | Path = CASE_DB_PATH):
+    def __init__(
+        self,
+        path: str | Path = CASE_DB_PATH,
+        *,
+        principal: SecurityPrincipal | None = None,
+    ):
         self.path = Path(path)
+        self.principal = principal
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.path.parent, 0o700)
         self._initialize()
+        os.chmod(self.path, 0o600)
 
     def _connect(self) -> sqlite3.Connection:
         con = sqlite3.connect(self.path, timeout=10)
@@ -190,6 +209,7 @@ class CaseStore:
                     model_score REAL NOT NULL CHECK(model_score >= 0 AND model_score <= 1),
                     threshold REAL NOT NULL CHECK(threshold >= 0 AND threshold <= 1),
                     model_version TEXT NOT NULL,
+                    organization_id TEXT NOT NULL,
                     status TEXT NOT NULL CHECK(status IN (
                         'alert_open', 'under_review', 'rgs_not_reached', 'rgs_reached'
                     )),
@@ -252,6 +272,52 @@ class CaseStore:
             ).fetchone()
             if needs_hash_backfill or incomplete_hashes:
                 self._backfill_event_hashes(con)
+            case_columns = {row[1] for row in con.execute("PRAGMA table_info(cases)")}
+            if "organization_id" not in case_columns:
+                con.execute("ALTER TABLE cases ADD COLUMN organization_id TEXT")
+            con.execute(
+                "UPDATE cases SET organization_id = ? "
+                "WHERE organization_id IS NULL OR TRIM(organization_id) = ''",
+                (LEGACY_UNSCOPED_ORGANIZATION,),
+            )
+
+    def _identity(
+        self,
+        permission: Permission,
+        *,
+        principal: SecurityPrincipal | None = None,
+        actor: str | None = None,
+        actor_role: ReviewerRole | str | None = None,
+        resource_organization_id: str | None = None,
+    ) -> tuple[SecurityPrincipal, str]:
+        """Resolve a trusted principal and enforce policy in one place.
+
+        Actor/role inputs are retained only as a development compatibility seam.  The
+        local provider refuses to create them in production mode.
+        """
+        identity = principal or self.principal
+        try:
+            if identity is None:
+                roles = [ReviewerRole(actor_role).value] if actor_role is not None else None
+                identity = local_development_principal(subject=actor, roles=roles)
+            elif actor is not None and str(actor).strip() != identity.subject:
+                raise AuthorizationError("Actor does not match the authenticated identity")
+            elif actor_role is not None and ReviewerRole(actor_role).value not in identity.roles:
+                raise AuthorizationError("Asserted role is not granted to the identity")
+            require_permission(
+                identity,
+                permission,
+                resource_organization_id=resource_organization_id,
+            )
+            if identity.organization_id is None:
+                raise AuthorizationError("A verified organization identity is required")
+            return identity, role_for_audit(identity, permission)
+        except (SecurityError, ValueError) as exc:
+            if permission is Permission.RECORD_RGS_DECISION:
+                raise AuthorizationError(
+                    "Only an authorized RGS reviewer may record an RGS disposition"
+                ) from exc
+            raise AuthorizationError(str(exc)) from exc
 
     @staticmethod
     def _backfill_event_hashes(con: sqlite3.Connection) -> None:
@@ -309,14 +375,21 @@ class CaseStore:
         model_score: float,
         threshold: float,
         model_version: str,
-        actor: str,
-        actor_role: ReviewerRole | str = ReviewerRole.INVESTIGATOR,
+        actor: str | None = None,
+        actor_role: ReviewerRole | str | None = None,
+        principal: SecurityPrincipal | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> CaseRecord:
         trans_num = _required_text(trans_num, "trans_num")
         model_version = _required_text(model_version, "model_version")
-        actor = _required_text(actor, "actor", 2)
-        role = _role(actor_role)
+        identity, role_value = self._identity(
+            Permission.CREATE_ALERT,
+            principal=principal,
+            actor=actor,
+            actor_role=actor_role,
+        )
+        actor = identity.subject
+        role = _role(role_value)
         if not math.isfinite(model_score) or not math.isfinite(threshold):
             raise ValidationError("model_score and threshold must be finite")
         if not 0 <= threshold <= 1 or not 0 <= model_score <= 1:
@@ -335,6 +408,7 @@ class CaseStore:
             "model_score": model_score,
             "threshold": threshold,
             "model_version": model_version,
+            "identity": identity.audit_metadata(),
         })
         rationale = "Model score met the configured investigation-alert threshold."
         metadata_json = json.dumps(event_metadata, sort_keys=True)
@@ -357,11 +431,11 @@ class CaseStore:
                 con.execute("BEGIN IMMEDIATE")
                 con.execute(
                     """INSERT INTO cases
-                       (case_id, trans_num, model_score, threshold, model_version, status,
-                        assigned_to, created_at, updated_at, version)
-                       VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, 1)""",
+                       (case_id, trans_num, model_score, threshold, model_version,
+                        organization_id, status, assigned_to, created_at, updated_at, version)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 1)""",
                     (case_id, trans_num, model_score, threshold, model_version,
-                     CaseStatus.ALERT_OPEN.value, timestamp, timestamp),
+                     identity.organization_id, CaseStatus.ALERT_OPEN.value, timestamp, timestamp),
                 )
                 con.execute(
                     """INSERT INTO case_events
@@ -376,42 +450,79 @@ class CaseStore:
             if "trans_num" in str(exc) or "UNIQUE constraint failed: cases.trans_num" in str(exc):
                 raise DuplicateAlert(f"A case already exists for transaction {trans_num}") from exc
             raise
-        return self.get_case(case_id)
+        return self.get_case(case_id, principal=identity)
 
-    def get_case(self, case_id: str) -> CaseRecord:
+    def get_case(
+        self, case_id: str, *, principal: SecurityPrincipal | None = None
+    ) -> CaseRecord:
         with self._connect() as con:
             row = con.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
         if row is None:
             raise CaseNotFound(f"Unknown case: {case_id}")
-        return self._case(row)
+        case = self._case(row)
+        self._identity(
+            Permission.READ_CASE,
+            principal=principal,
+            resource_organization_id=case.organization_id,
+        )
+        return case
 
-    def find_by_transaction(self, trans_num: str) -> CaseRecord | None:
+    def find_by_transaction(
+        self, trans_num: str, *, principal: SecurityPrincipal | None = None
+    ) -> CaseRecord | None:
         with self._connect() as con:
             row = con.execute("SELECT * FROM cases WHERE trans_num = ?", (trans_num,)).fetchone()
-        return self._case(row) if row else None
+        if row is None:
+            return None
+        case = self._case(row)
+        self._identity(
+            Permission.READ_CASE,
+            principal=principal,
+            resource_organization_id=case.organization_id,
+        )
+        return case
 
-    def list_cases(self, status: CaseStatus | str | None = None) -> list[CaseRecord]:
+    def list_cases(
+        self,
+        status: CaseStatus | str | None = None,
+        *,
+        principal: SecurityPrincipal | None = None,
+    ) -> list[CaseRecord]:
+        identity, _ = self._identity(Permission.READ_CASE, principal=principal)
         query = "SELECT * FROM cases"
-        params: tuple[str, ...] = ()
+        clauses: list[str] = []
+        params: list[str] = []
+        if identity.provider == "local-development":
+            clauses.append("organization_id IN (?, ?)")
+            params.extend([identity.organization_id, LEGACY_UNSCOPED_ORGANIZATION])
+        else:
+            clauses.append("organization_id = ?")
+            params.append(identity.organization_id)
         if status is not None:
             status_value = CaseStatus(status).value
-            query += " WHERE status = ?"
-            params = (status_value,)
+            clauses.append("status = ?")
+            params.append(status_value)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY updated_at DESC, case_id"
         with self._connect() as con:
-            rows = con.execute(query, params).fetchall()
+            rows = con.execute(query, tuple(params)).fetchall()
         return [self._case(row) for row in rows]
 
-    def history(self, case_id: str) -> list[CaseEvent]:
-        self.get_case(case_id)
+    def history(
+        self, case_id: str, *, principal: SecurityPrincipal | None = None
+    ) -> list[CaseEvent]:
+        self.get_case(case_id, principal=principal)
         with self._connect() as con:
             rows = con.execute(
                 "SELECT * FROM case_events WHERE case_id = ? ORDER BY sequence", (case_id,)
             ).fetchall()
         return [self._event(row) for row in rows]
 
-    def list_evidence(self, case_id: str) -> list[EvidenceRecord]:
-        self.get_case(case_id)
+    def list_evidence(
+        self, case_id: str, *, principal: SecurityPrincipal | None = None
+    ) -> list[EvidenceRecord]:
+        self.get_case(case_id, principal=principal)
         with self._connect() as con:
             rows = con.execute(
                 "SELECT * FROM case_evidence WHERE case_id = ? ORDER BY created_at, evidence_id",
@@ -424,26 +535,37 @@ class CaseStore:
         case_id: str,
         *,
         receipt: EvidenceReceipt,
-        actor: str,
-        actor_role: ReviewerRole | str,
+        actor: str | None = None,
+        actor_role: ReviewerRole | str | None = None,
+        principal: SecurityPrincipal | None = None,
         expected_version: int,
     ) -> CaseRecord:
-        actor = _required_text(actor, "actor", 2)
-        role = _role(actor_role)
         if receipt.case_id != case_id:
             raise ValidationError(
                 f"Evidence belongs to {receipt.case_id}, not requested case {case_id}"
             )
         timestamp = _now()
-        metadata = asdict(receipt)
-        metadata_json = json.dumps(metadata, sort_keys=True)
-        rationale = f"Preserved and linked {receipt.evidence_type} evidence {receipt.evidence_id}."
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()
             if row is None:
                 raise CaseNotFound(f"Unknown case: {case_id}")
             current = self._case(row)
+            identity, role_value = self._identity(
+                Permission.ATTACH_EVIDENCE,
+                principal=principal,
+                actor=actor,
+                actor_role=actor_role,
+                resource_organization_id=current.organization_id,
+            )
+            actor = identity.subject
+            role = _role(role_value)
+            metadata = asdict(receipt)
+            metadata["identity"] = identity.audit_metadata()
+            metadata_json = json.dumps(metadata, sort_keys=True)
+            rationale = (
+                f"Preserved and linked {receipt.evidence_type} evidence {receipt.evidence_id}."
+            )
             if current.version != expected_version:
                 raise ConcurrencyError(
                     f"Case {case_id} changed from version {expected_version} to "
@@ -523,12 +645,19 @@ class CaseStore:
                     event_hash,
                 ),
             )
-        return self.get_case(case_id)
+        return self.get_case(case_id, principal=identity)
 
-    def verify_integrity(self, case_id: str) -> dict[str, Any]:
-        case = self.get_case(case_id)
-        history = self.history(case_id)
-        evidence = self.list_evidence(case_id)
+    def verify_integrity(
+        self, case_id: str, *, principal: SecurityPrincipal | None = None
+    ) -> dict[str, Any]:
+        case = self.get_case(case_id, principal=principal)
+        identity, _ = self._identity(
+            Permission.VERIFY_INTEGRITY,
+            principal=principal,
+            resource_organization_id=case.organization_id,
+        )
+        history = self.history(case_id, principal=identity)
+        evidence = self.list_evidence(case_id, principal=identity)
         issues: list[str] = []
         previous = ""
         for event in history:
@@ -556,6 +685,15 @@ class CaseStore:
             issues.append(
                 f"Case version {case.version} does not match last event {history[-1].sequence}"
             )
+        if history and case.organization_id != LEGACY_UNSCOPED_ORGANIZATION:
+            committed_organization = (
+                history[0].metadata.get("identity", {}).get("organization_id")
+            )
+            if committed_organization != case.organization_id:
+                issues.append(
+                    "Case organization does not match the organization committed "
+                    "in the initial event"
+                )
         evidence_events = {
             event.metadata.get("evidence_id"): event.metadata
             for event in history
@@ -601,24 +739,32 @@ class CaseStore:
         self,
         case_id: str,
         *,
-        actor: str,
-        actor_role: ReviewerRole | str,
+        actor: str | None = None,
+        actor_role: ReviewerRole | str | None = None,
+        principal: SecurityPrincipal | None = None,
         rationale: str,
         expected_version: int,
     ) -> CaseRecord:
-        role = _role(actor_role)
-        if role not in {ReviewerRole.INVESTIGATOR, ReviewerRole.AUTHORIZED_RGS_REVIEWER}:
-            raise AuthorizationError(f"Role {role.value} cannot start a review")
+        current = self.get_case(case_id, principal=principal)
+        identity, role_value = self._identity(
+            Permission.START_REVIEW,
+            principal=principal,
+            actor=actor,
+            actor_role=actor_role,
+            resource_organization_id=current.organization_id,
+        )
+        role = _role(role_value)
         return self._transition(
             case_id,
             expected_from=CaseStatus.ALERT_OPEN,
             to_status=CaseStatus.UNDER_REVIEW,
             event_type="review_started",
-            actor=actor,
+            actor=identity.subject,
             actor_role=role,
+            identity=identity,
             rationale=rationale,
             expected_version=expected_version,
-            assigned_to=_required_text(actor, "actor", 2),
+            assigned_to=identity.subject,
         )
 
     def record_rgs_decision(
@@ -626,24 +772,30 @@ class CaseStore:
         case_id: str,
         *,
         reached: bool,
-        actor: str,
-        actor_role: ReviewerRole | str,
+        actor: str | None = None,
+        actor_role: ReviewerRole | str | None = None,
+        principal: SecurityPrincipal | None = None,
         rationale: str,
         expected_version: int,
     ) -> CaseRecord:
-        role = _role(actor_role)
-        if role is not ReviewerRole.AUTHORIZED_RGS_REVIEWER:
-            raise AuthorizationError(
-                "Only an explicitly authorized RGS reviewer may record an RGS disposition"
-            )
+        current = self.get_case(case_id, principal=principal)
+        identity, role_value = self._identity(
+            Permission.RECORD_RGS_DECISION,
+            principal=principal,
+            actor=actor,
+            actor_role=actor_role,
+            resource_organization_id=current.organization_id,
+        )
+        role = _role(role_value)
         to_status = CaseStatus.RGS_REACHED if reached else CaseStatus.RGS_NOT_REACHED
         return self._transition(
             case_id,
             expected_from=CaseStatus.UNDER_REVIEW,
             to_status=to_status,
             event_type=to_status.value,
-            actor=actor,
+            actor=identity.subject,
             actor_role=role,
+            identity=identity,
             rationale=rationale,
             expected_version=expected_version,
         )
@@ -657,6 +809,7 @@ class CaseStore:
         event_type: str,
         actor: str,
         actor_role: ReviewerRole,
+        identity: SecurityPrincipal,
         rationale: str,
         expected_version: int,
         assigned_to: str | None = None,
@@ -699,7 +852,7 @@ class CaseStore:
             ).fetchone()
             previous_hash = previous_hash_row[0] if previous_hash_row else ""
             event_id = str(uuid.uuid4())
-            metadata_json = "{}"
+            metadata_json = json.dumps({"identity": identity.audit_metadata()}, sort_keys=True)
             event_hash = _event_digest(
                 event_id=event_id,
                 case_id=case_id,
@@ -724,7 +877,7 @@ class CaseStore:
                  current.status, to_status.value, actor, actor_role.value,
                  rationale, metadata_json, timestamp, previous_hash, event_hash),
             )
-        return self.get_case(case_id)
+        return self.get_case(case_id, principal=identity)
 
 
 def case_to_dict(record: CaseRecord) -> dict[str, Any]:

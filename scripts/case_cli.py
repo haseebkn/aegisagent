@@ -19,6 +19,7 @@ from scripts.case_management import (
     evidence_to_dict,
     event_to_dict,
 )
+from scripts.security import AuthenticationRequired, local_development_principal
 
 
 def _role(value: str) -> ReviewerRole:
@@ -75,7 +76,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    store = CaseStore(args.db) if args.db else CaseStore()
+    requested_role = getattr(args, "role", None)
+    try:
+        principal = local_development_principal(
+            subject=getattr(args, "actor", None),
+            roles=[requested_role.value] if requested_role is not None else None,
+        )
+    except AuthenticationRequired as exc:
+        raise SystemExit(f"AUTHENTICATION_REQUIRED: {exc}") from exc
+    store = CaseStore(args.db, principal=principal) if args.db else CaseStore(principal=principal)
     try:
         if args.command == "create":
             result = case_to_dict(store.create_alert_case(
@@ -83,14 +92,12 @@ def main() -> None:
                 model_score=args.score,
                 threshold=args.threshold,
                 model_version=args.model_version,
-                actor=args.actor,
-                actor_role=args.role,
+                principal=principal,
             ))
         elif args.command == "start-review":
             result = case_to_dict(store.start_review(
                 args.case_id,
-                actor=args.actor,
-                actor_role=args.role,
+                principal=principal,
                 rationale=args.rationale,
                 expected_version=args.expected_version,
             ))
@@ -98,8 +105,7 @@ def main() -> None:
             result = case_to_dict(store.record_rgs_decision(
                 args.case_id,
                 reached=args.rgs == "reached",
-                actor=args.actor,
-                actor_role=args.role,
+                principal=principal,
                 rationale=args.rationale,
                 expected_version=args.expected_version,
             ))

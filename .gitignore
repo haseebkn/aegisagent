@@ -4,6 +4,8 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+.uv-cache/
+.tools/
 venv/
 ENV/
 env/
@@ -49,6 +51,7 @@ logs/
 # --- Credentials & Configs ---
 .env
 .env.*
+!.env.example
 .user.yml
 secrets.json
 *credentials*

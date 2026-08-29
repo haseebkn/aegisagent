@@ -21,7 +21,15 @@ from scripts.case_management import (
 )
 from scripts.inference_engine import load_models, run_inference
 from scripts.pii import mask_pan
+from scripts.privacy import safe_error_message
 from scripts.sar_agent import generate_sar_narrative, save_sar_report
+from scripts.security import (
+    AuthMode,
+    AuthenticationRequired,
+    SecurityError,
+    auth_mode,
+    local_development_principal,
+)
 
 # Page config
 st.set_page_config(
@@ -315,18 +323,33 @@ st.markdown(
 st.sidebar.header("🔍 Transaction Selection")
 
 st.sidebar.subheader("👤 Human reviewer")
-reviewer_id = st.sidebar.text_input(
-    "Reviewer identifier",
-    help="Use a stable workforce identifier. This demo does not authenticate it.",
-).strip()
+try:
+    current_auth_mode = auth_mode()
+except SecurityError:
+    st.sidebar.error("Authentication configuration is invalid; access is denied.")
+    st.stop()
+if current_auth_mode is AuthMode.PRODUCTION:
+    st.sidebar.error(
+        "Production mode is locked: no verified identity adapter is configured yet. "
+        "Clerk integration is intentionally deferred until the service boundary is stable."
+    )
+    st.stop()
+
 reviewer_role = st.sidebar.selectbox(
-    "Workflow role",
+    "Local demo role",
     options=[role.value for role in ReviewerRole],
     format_func=lambda value: value.replace("_", " ").title(),
-    help=(
-        "Role selection is self-attested in this local demo. Production authorization "
-        "and segregation-of-duties controls remain out of scope."
-    ),
+    help="Development-only identity selection; this provider is disabled in production mode.",
+)
+try:
+    security_principal = local_development_principal(roles=[reviewer_role])
+except AuthenticationRequired as exc:
+    st.error(f"Authentication unavailable: {safe_error_message(exc)}")
+    st.stop()
+reviewer_id = security_principal.subject
+st.sidebar.caption(
+    f"Identity: `{reviewer_id}` · organization: "
+    f"`{security_principal.organization_id}` · development only"
 )
 
 # Load data and prepare dropdown options
@@ -648,7 +671,7 @@ if triggered:
     )
 
     st.markdown("#### Human review case")
-    case_store = CaseStore()
+    case_store = CaseStore(principal=security_principal)
     case_record = case_store.find_by_transaction(selected_txn["trans_num"])
 
     if case_record is None:
@@ -658,7 +681,6 @@ if triggered:
         )
         if st.button(
             "Create Investigation Case",
-            disabled=len(reviewer_id) < 2,
             use_container_width=True,
         ):
             try:
@@ -667,15 +689,12 @@ if triggered:
                     model_score=meta_score,
                     threshold=threshold,
                     model_version=model_version,
-                    actor=reviewer_id,
-                    actor_role=reviewer_role,
+                    principal=security_principal,
                     metadata={"source": "streamlit_dashboard"},
                 )
                 st.rerun()
             except CaseManagementError as exc:
                 st.error(f"Case creation rejected: {exc}")
-        if len(reviewer_id) < 2:
-            st.info("Enter a reviewer identifier in the sidebar to create a case.")
         st.stop()
 
     status_labels = {
@@ -735,14 +754,12 @@ if triggered:
         )
         if st.button(
             "Assign to Me & Start Review",
-            disabled=len(reviewer_id) < 2,
             use_container_width=True,
         ):
             try:
                 case_store.start_review(
                     case_record.case_id,
-                    actor=reviewer_id,
-                    actor_role=reviewer_role,
+                    principal=security_principal,
                     rationale=review_rationale,
                     expected_version=case_record.version,
                 )
@@ -770,16 +787,15 @@ if triggered:
                 ),
             )
             st.caption(
-                "Only the authorized_rgs_reviewer role can save a disposition. Selecting "
-                "that role here is a demo assertion, not production authentication."
+                "Only an identity granted the authorized_rgs_reviewer permission can save "
+                "a disposition. The displayed identity comes from the local-only provider."
             )
             if st.button("Save RGS Disposition", use_container_width=True):
                 try:
                     case_store.record_rgs_decision(
                         case_record.case_id,
                         reached=decision == "RGS reached",
-                        actor=reviewer_id,
-                        actor_role=reviewer_role,
+                        principal=security_principal,
                         rationale=decision_rationale,
                         expected_version=case_record.version,
                     )
@@ -853,8 +869,7 @@ if triggered:
                         meta_score,
                         st.session_state.narrative,
                         case_id=case_record.case_id,
-                        actor=reviewer_id,
-                        actor_role=reviewer_role,
+                        principal=security_principal,
                         expected_case_version=case_record.version,
                         case_store=case_store,
                     )
@@ -876,8 +891,11 @@ if triggered:
                         )
                 except ValueError as ve:
                     st.error(f"Draft validation failed: {ve}")
-                except Exception as ex:
-                    st.error(f"Failed to save the narrative draft: {ex}")
+                except Exception:
+                    st.error(
+                        "Failed to save the narrative draft. Review the protected server logs "
+                        "using the case and transaction identifiers."
+                    )
 else:
     st.success(
         "This transaction does not exceed the model's alert threshold. No model alert "

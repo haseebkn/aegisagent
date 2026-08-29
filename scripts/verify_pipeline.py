@@ -91,8 +91,7 @@ def _load_scored_test_sample(limit=10000):
     con = duckdb.connect(str(DB_PATH))
     try:
         df = con.execute(f"""
-            SELECT f.*, t.first, t.last, t.gender, t.street, t.city, t.state, t.zip,
-                   t.lat, t.long, t.merchant, t.category, t.merch_lat, t.merch_long, t.job
+            SELECT f.*, t.merchant, t.category
             FROM fct_fraud_features f
             LEFT JOIN stg_transactions_test t ON f.trans_num = t.trans_num
             WHERE f.evaluation_role = 'development_holdout'
@@ -150,7 +149,7 @@ def verify_sar_agent():
 
     print("\nGenerated Investigation Narrative Draft Preview (not filed):")
     print("-" * 50)
-    print(narrative[:600] + "...")
+    print("Narrative generated; content suppressed from verification logs.")
     print("-" * 50)
 
     missing = [s for s in ("WHO", "WHAT", "WHEN", "WHERE", "WHY", "HOW") if s not in narrative]

@@ -1,10 +1,14 @@
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:1042b61448fef4ba92d16a8c7eb4996d027568ce64792a7877fd88511e0af7c6
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Fixed, non-root runtime identity. Package installation remains the only root step.
+RUN groupadd --gid 10001 aegis \
+    && useradd --uid 10001 --gid aegis --no-create-home --shell /usr/sbin/nologin aegis
 
 # Dependencies first so application edits do not bust the layer cache.
 COPY requirements.txt .
@@ -21,11 +25,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 1) because this COPY takes whatever is on disk: six accumulated versions once made
 # a 4 GB image for a model needing 244 MB. CI cannot catch that -- it trains a single
 # tiny fixture model, so the bloat is invisible there by construction.
-COPY dbt_project.yml profiles.yml app.py ./
-COPY models/ ./models/
-COPY scripts/ ./scripts/
-COPY tests/ ./tests/
-COPY models_artifacts/ ./models_artifacts/
+COPY --chown=aegis:aegis dbt_project.yml profiles.yml app.py ./
+COPY --chown=aegis:aegis models/ ./models/
+COPY --chown=aegis:aegis scripts/ ./scripts/
+COPY --chown=aegis:aegis tests/ ./tests/
+COPY --chown=aegis:aegis models_artifacts/ ./models_artifacts/
 
 # Paths resolve relative to the repo root by default (see scripts/config.py); these
 # are set explicitly so the values are visible in `docker inspect`.
@@ -34,12 +38,17 @@ ENV DBT_DB_PATH=/app/aegis_db.duckdb \
     AEGIS_RAW_DATA_DIR=/app \
     MODELS_ARTIFACTS_DIR=/app/models_artifacts \
     COMPLIANCE_LOGS_DIR=/app/compliance_logs \
+    AEGIS_SECURITY_MODE=production \
     PYTHONPATH=/app
 
-RUN mkdir -p /app/compliance_logs
+RUN mkdir -p /app/compliance_logs \
+    && chown aegis:aegis /app/compliance_logs \
+    && chmod 700 /app/compliance_logs
 
 # The DuckDB file is data, not code: mount it at runtime.
 #   docker run -v "$PWD/aegis_db.duckdb:/app/aegis_db.duckdb" aegis-app:latest
 VOLUME ["/app/compliance_logs"]
+
+USER aegis
 
 CMD ["python", "scripts/verify_pipeline.py"]

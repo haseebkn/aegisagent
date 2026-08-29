@@ -10,6 +10,17 @@ __pycache__/
 *.pyc
 .git/
 .pytest_cache/
+.uv-cache/
+.tools/
+
+# Credentials and local configuration must not even enter the build context.
+.env
+.env.*
+.aws/
+*credentials*
+secrets.json
+*.key
+*.pem
 
 # Large local-only assets. The raw CSVs are rebuilt into the DuckDB file by dbt;
 # mount them at runtime (AEGIS_RAW_DATA_DIR) if the container needs to re-run dbt.

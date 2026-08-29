@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.0 — 2026-08-28
+
+Phase 4A establishes a vendor-neutral security and privacy boundary without coupling
+the application to Clerk before the service architecture is stable.
+
+- Added validated security principals, deny-by-default permissions, organization
+  isolation, and token-free identity metadata in the hash-chained case history.
+- Disabled the local demonstration identity provider in production mode; Terraform
+  explicitly selects production mode, which fails closed until Clerk is integrated.
+- Replaced Bedrock payload construction with a strict allowlist that removes names,
+  demographics, occupation, address/postal data, and exact coordinates.
+- Added secret/PAN redaction at error boundaries, generic dashboard errors, owner-only
+  local storage permission requests, explicit S3 encryption, and a TLS-only bucket policy.
+- Restricted the CI token to read-only repository contents, upgraded all JavaScript
+  actions to Node.js 24 generations, and enabled weekly Dependabot action updates.
+- Made the image default to fail-closed production authentication, changed its runtime
+  to a fixed non-root user, and excluded credential-shaped files from build context.
+- Suppressed generated narrative content from CLI and verification logs.
+- Added adversarial tests for role escalation, actor spoofing, cross-organization access,
+  production self-attestation, prompt leakage, and secret redaction.
+
 ## 0.4.2 — 2026-08-28
 
 Phase 3 CI closure.

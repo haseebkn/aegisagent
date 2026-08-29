@@ -12,7 +12,10 @@ from scripts.config import COMPLIANCE_LOGS_DIR, EVIDENCE_DIR
 from scripts.evidence import EvidenceStore
 from scripts.grounding import check_narrative, correction_prompt
 from scripts.inference_engine import NoAlertsInSample
-from scripts.pii import mask_name, mask_pan
+from scripts.pii import mask_pan
+from scripts.privacy import minimize_for_narrative, safe_error_message
+from scripts.security import SecurityPrincipal
+from scripts.security import AuthenticationRequired, local_development_principal
 
 BEDROCK_MODEL_ID = os.environ.get(
     "BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
@@ -27,6 +30,10 @@ def generate_sar_narrative(txn, p_m2, p_m3, p_m4, meta_score, client=None):
     """
     if client is None or isinstance(client, str):
         client = boto3.client('bedrock-runtime', region_name=BEDROCK_REGION)
+    # Strict minimization happens before string interpolation so prohibited fields
+    # cannot enter the external model request accidentally.
+    txn = minimize_for_narrative(txn)
+
     # 1. Voting Breakdown
     votes = []
     if p_m2 > 0.5: votes.append("Model 2 (Geographic Focus)")
@@ -65,9 +72,8 @@ def generate_sar_narrative(txn, p_m2, p_m3, p_m4, meta_score, client=None):
 - Transaction Number: {txn.get('trans_num', 'N/A')}
 - Date/Time: {str(txn.get('trans_date_trans_time', 'N/A'))}
 - Credit Card (masked): {mask_pan(txn.get('cc_num'))}
-- Customer: {mask_name(txn.get('first'), txn.get('last'))} (Gender: {txn.get('gender', 'N/A')}, Job: {txn.get('job', 'N/A')})
-- Customer Location: {txn.get('city', 'N/A')}, {txn.get('state', 'N/A')} {txn.get('zip', 'N/A')} (Lat/Long: {txn.get('lat', 'N/A')}/{txn.get('long', 'N/A')})
-- Merchant: {txn.get('merchant', 'N/A')} (Category: {txn.get('category', 'N/A')}, Lat/Long: {txn.get('merch_lat', 'N/A')}/{txn.get('merch_long', 'N/A')})
+- Customer reference: cardholder associated with {mask_pan(txn.get('cc_num'))}
+- Merchant: {txn.get('merchant', 'N/A')} (Category: {txn.get('category', 'N/A')})
 - Amount: ${txn.get('amt', 0.0):.2f}
 
 Engineered Signals:
@@ -153,7 +159,10 @@ Generate the 5W+H investigation narrative draft now. Use only the figures above.
                 print("Max retries reached; returning last narrative for quarantine.")
                 return narrative
         except Exception as e:
-            print(f"ERROR calling AWS Bedrock API on attempt {attempt + 1}: {e}")
+            print(
+                f"ERROR calling AWS Bedrock API on attempt {attempt + 1}: "
+                f"{safe_error_message(e)}"
+            )
             if attempt == max_retries:
                 return None
 
@@ -167,8 +176,9 @@ def save_sar_report(
     output_dir=None,
     *,
     case_id,
-    actor,
-    actor_role,
+    actor=None,
+    actor_role=None,
+    principal: SecurityPrincipal | None = None,
     expected_case_version,
     case_store=None,
     evidence_store=None,
@@ -210,7 +220,6 @@ Status: DRAFT / NOT APPROVED / NOT SUBMITTED
 METADATA:
 Transaction Number:     {trans_num}
 Credit Card (masked):   {mask_pan(txn.get('cc_num'))}
-Customer Name:          {mask_name(txn.get('first'), txn.get('last'))}
 Transaction Amount:     ${txn.get('amt', 0.0):.2f}
 Merchant Name:          {txn.get('merchant', 'N/A')}
 Merchant Category:      {txn.get('category', 'N/A')}
@@ -241,6 +250,7 @@ NARRATIVE:
         receipt=receipt,
         actor=actor,
         actor_role=actor_role,
+        principal=principal,
         expected_version=expected_case_version,
     )
     archive = receipt.archive_receipt
@@ -250,7 +260,10 @@ NARRATIVE:
             f"version={archive['version_id']} checksum={receipt.sha256}"
         )
     elif archive:
-        print(f"UNVERIFIED ARCHIVE ATTEMPT: {archive['error_type']}: {archive['error']}")
+        print(
+            "UNVERIFIED ARCHIVE ATTEMPT: "
+            f"{archive['error_type']}: {safe_error_message(archive['error'])}"
+        )
     print(
         f"Evidence {receipt.evidence_id} linked to {case_id}: {receipt.local_path} "
         f"sha256={receipt.sha256}"
@@ -278,8 +291,7 @@ def _highest_risk_alert(sample_size):
     con = duckdb.connect(str(DB_PATH))
     try:
         df = con.execute(f"""
-            SELECT f.*, t.first, t.last, t.gender, t.street, t.city, t.state, t.zip,
-                   t.lat, t.long, t.merchant, t.category, t.merch_lat, t.merch_long, t.job
+            SELECT f.*, t.merchant, t.category
             FROM fct_fraud_features f
             LEFT JOIN stg_transactions_test t ON f.trans_num = t.trans_num
             WHERE f.evaluation_role = 'development_holdout'
@@ -309,6 +321,14 @@ def main():
     parser.add_argument('--expected-case-version', type=int, required=True)
     args = parser.parse_args()
 
+    try:
+        principal = local_development_principal(
+            subject=args.actor,
+            roles=[args.role],
+        )
+    except AuthenticationRequired as exc:
+        raise SystemExit(f"AUTHENTICATION_REQUIRED: {exc}") from exc
+
     print("=== INVESTIGATION NARRATIVE DRAFTING ASSISTANT ===")
     print(f"Scoring {args.sample_size} development-holdout transactions with demo artifacts...")
     try:
@@ -327,9 +347,10 @@ def main():
         print("Failed to generate narrative. Verify AWS credentials and Bedrock access.")
         return
 
-    print("\nGenerated Investigation Narrative Draft (not filed):\n")
-    print(narrative)
-    print("=" * 60)
+    print(
+        "Narrative generated in memory; content is not written to stdout. "
+        "Proceeding to grounding review and protected evidence storage."
+    )
 
     try:
         save_sar_report(
@@ -341,9 +362,9 @@ def main():
             narrative,
             args.output_dir,
             case_id=args.case_id,
-            actor=args.actor,
-            actor_role=args.role,
+            principal=principal,
             expected_case_version=args.expected_case_version,
+            case_store=CaseStore(principal=principal),
         )
     except ValueError as e:
         print(f"DRAFT_VALIDATION_ERROR: {e}")

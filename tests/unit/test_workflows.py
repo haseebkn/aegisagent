@@ -14,6 +14,7 @@ yaml = pytest.importorskip("yaml")
 
 WORKFLOW_DIR = Path(__file__).resolve().parents[2] / ".github" / "workflows"
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "make_fixture.py"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def workflow_files():
@@ -57,3 +58,28 @@ def test_fixture_reference_is_warm_and_ci_row_contract_matches():
     expected = constants["DEFAULT_TRAIN_ROWS"] + constants["DEFAULT_TEST_ROWS"]
     workflow_text = "\n".join(path.read_text(encoding="utf-8") for path in workflow_files())
     assert f"expected_row_count: {expected}" in workflow_text
+
+
+def test_ci_uses_read_only_token_and_node24_action_generations():
+    ci_path = WORKFLOW_DIR / "ci.yml"
+    doc = yaml.safe_load(ci_path.read_text(encoding="utf-8"))
+    assert doc["permissions"] == {"contents": "read"}
+    workflow_text = ci_path.read_text(encoding="utf-8")
+    for retired in (
+        "actions/checkout@v4",
+        "actions/setup-python@v5",
+        "hashicorp/setup-terraform@v3",
+        "docker/setup-buildx-action@v3",
+        "docker/build-push-action@v6",
+    ):
+        assert retired not in workflow_text
+
+
+def test_container_defaults_to_non_root_fail_closed_runtime():
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
+    assert "FROM python:3.11-slim@sha256:" in dockerfile
+    assert "AEGIS_SECURITY_MODE=production" in dockerfile
+    assert "USER aegis" in dockerfile
+    for excluded in (".env", ".aws/", "*credentials*", "*.pem"):
+        assert excluded in dockerignore

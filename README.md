@@ -72,10 +72,12 @@ pristine independent test.
 
 **Human-review layer.** A threshold-breaching transaction can create one persisted
 case. The enforced workflow is `alert_open → under_review → rgs_not_reached /
-rgs_reached`; assignment and disposition require identified actors and rationales,
-and only the asserted `authorized_rgs_reviewer` role can record a terminal RGS
-decision. Every transition is appended to local case history with optimistic
-concurrency protection. No state represents filing or submission. See
+rgs_reached`; assignment and disposition require identified actors and rationales.
+Phase 4A places every operation behind a deny-by-default permission policy, scopes
+cases by organization, and allows only the `authorized_rgs_reviewer` role to record a
+terminal RGS decision. Identity metadata is committed to local case history with
+optimistic concurrency protection. The local provider is development-only and
+production fails closed until Clerk is integrated. No state represents filing or submission. See
 [docs/human-review-workflow.md](docs/human-review-workflow.md).
 
 **Narrative layer.** Narrative drafting is available only while a case is under human
@@ -92,9 +94,10 @@ only when the response includes the requested checksum and an object VersionId; 
 attempts remain visible and make integrity verification fail. See
 [docs/evidence-integrity.md](docs/evidence-integrity.md). Passing drafts remain drafts:
 the project does not collect the complete
-Schedule 1 data, implement approval, or submit anything to FINTRAC. Card numbers and
-names are masked before they leave the process, but other personal and location data
-remain in the prompt. The
+Schedule 1 data, implement approval, or submit anything to FINTRAC. Phase 4A builds
+the Bedrock request from a strict allowlist: PANs are masked, and names, demographics,
+occupation, address/postal data, and exact customer/merchant coordinates are excluded.
+This is minimization, not anonymization. The
 reasoning behind this control, and why the previous hedging-word blacklist was wrong
 in both directions, is in [docs/str-narrative-design.md](docs/str-narrative-design.md).
 
@@ -218,7 +221,7 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 | Job | What it does |
 |---|---|
 | Lint | `ruff check` on correctness rules only (F, E9, W6). Exists because dead code accumulated twice, including a function renamed at its definition but not its call site — which no test could catch, since nothing imports it. |
-| Unit tests | 102 pytest cases over PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, fixture stability, and path resolution. |
+| Unit tests | 116 pytest cases over authentication modes, deny-by-default authorization, organization isolation/integrity and legacy migration, prompt minimization, secret redaction, CI permissions/action runtimes, container hardening, PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, fixture stability, and path resolution. |
 | dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`), runs the **real** dbt models and data tests against it — no 500 MB download — then runs the drift gate. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
 | Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard: `.dockerignore` once excluded `models/`, `models_artifacts/` and the DuckDB file, and `docker-compose` bind-mounted the repo over `/app`, hiding it. |
@@ -267,11 +270,12 @@ Read this before drawing conclusions from the metrics above.
   an unsupported inference. Phase 2 requires an active human-review case before a
   narrative can be drafted; Phase 3 preserves both passing drafts and grounding
   failures in the case evidence history.
-- **Workflow roles are not authentication.** The dashboard and CLI enforce state and
-  role rules, but identities and roles are self-attested. The SQLite history is
-  transactional, hash-chained, and append-only through the application API. That
-  detects corruption but is not a signature or external trust anchor; local state is
-  not access-controlled, backed up, or retention-managed.
+- **Phase 4A is an auth boundary, not a production login.** A vendor-neutral principal,
+  deny-by-default permissions, and organization scoping now protect the case layer.
+  The local identity provider is explicitly development-only; production mode fails
+  closed until Clerk supplies verified sessions. The SQLite history commits token-free
+  identity metadata and is hash-chained, but it is not a signature or external trust
+  anchor and is not backed up or retention-managed.
 - **A verified upload receipt is not a compliance opinion.** A matching S3 checksum
   and VersionId establish the remote object observed by this process. The project does
   not continuously reconcile or restore-test the bucket, and its Terraform retention
@@ -365,6 +369,10 @@ calibration/slice reporting, and latency measurement. Phase 2 (`0.3.0`) adds the
 persisted human-review and RGS state machine, role and rationale guards, concurrency
 control, case history, dashboard workflow, and CLI. Phase 3 (`0.4.2`) adds atomic
 case-linked evidence, event hash chaining, local integrity verification, and explicit
-S3 checksum/version receipts. The next priority is authentication, authorization,
-secrets and privacy controls, followed by service architecture and
+S3 checksum/version receipts. Phase 4A (`0.5.0`) adds a provider-neutral identity
+contract, deny-by-default RBAC, organization isolation, production fail-closed mode,
+secret-safe errors, prompt minimization, local file permissions, and TLS-enforced S3
+access. Clerk sign-in/session verification is intentionally deferred until after the
+service boundary is stable. See [docs/security-privacy.md](docs/security-privacy.md).
+The next priorities are service architecture, Clerk integration, and
 champion/challenger operations.
