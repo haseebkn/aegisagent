@@ -25,7 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 1) because this COPY takes whatever is on disk: six accumulated versions once made
 # a 4 GB image for a model needing 244 MB. CI cannot catch that -- it trains a single
 # tiny fixture model, so the bloat is invisible there by construction.
-COPY --chown=aegis:aegis dbt_project.yml profiles.yml app.py ./
+COPY --chown=aegis:aegis dbt_project.yml profiles.yml app.py service.py ./
 COPY --chown=aegis:aegis models/ ./models/
 COPY --chown=aegis:aegis scripts/ ./scripts/
 COPY --chown=aegis:aegis tests/ ./tests/

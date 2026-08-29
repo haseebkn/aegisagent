@@ -1,10 +1,10 @@
 # AegisAgent model card
 
-**Version:** 0.5.0
+**Version:** 0.6.0
 
 **Status:** portfolio/research baseline
 
-**Last updated:** 2026-08-28
+**Last updated:** 2026-08-29
 
 ## Model overview
 
@@ -112,6 +112,10 @@ record a terminal disposition. Every transition records an actor, role, rational
 timestamp, and case version. An RGS-reached disposition does not create or submit a
 report—it hands off to an approved reporting workflow outside this project.
 
+Phase 5 places this same domain workflow behind a versioned local HTTP API. The API
+does not add a model claim or regulatory capability: it provides transport contracts,
+request-scoped identity injection, concurrency responses, and health semantics only.
+
 The optional LLM output is an unapproved narrative draft available during active
 human review. Numeric grounding reduces
 some hallucinations but does not prove entailment or completeness. The project does
@@ -142,10 +146,11 @@ not a compliance opinion. HTML rendering, encryption-key governance, recovery,
 retention approval, full production authentication, and access monitoring require hardening. It must use synthetic data
 only in its current state.
 
-Nothing serves production traffic. Streamlit runs locally. The Docker image runs a
-verifier and exits. Terraform defines an AWS reference scaffold with an ECS desired
-count of zero; there is no scoring API, load balancer, operational SLA, or verified
-incident-response process.
+Nothing serves production traffic. Streamlit and the Phase 5 case API run locally.
+The image retains the verifier as its default command, while Docker Compose can start
+the API for development. Terraform defines an AWS reference scaffold with an ECS
+desired count of zero; there is no public endpoint, scoring API, load balancer,
+operational SLA, or verified incident-response process.
 
 ## Next validation gate
 

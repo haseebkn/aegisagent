@@ -174,6 +174,8 @@ jobs:
           from scripts.inference_engine import load_models
           sql = list(pathlib.Path('/app/models').rglob('*.sql'))
           assert pathlib.Path('/app/dbt_project.yml').exists(), 'dbt project missing'
+          import service
+          assert service.app.title == 'AegisAgent Case Service'
           assert len(sql) >= 6, f'expected dbt models, found {len(sql)}'
           threshold = load_models()[-1]
           assert 0.0 < threshold < 1.0, threshold

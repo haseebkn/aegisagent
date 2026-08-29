@@ -80,6 +80,13 @@ optimistic concurrency protection. The local provider is development-only and
 production fails closed until Clerk is integrated. No state represents filing or submission. See
 [docs/human-review-workflow.md](docs/human-review-workflow.md).
 
+**Service layer.** Phase 5 exposes the case domain through a versioned FastAPI boundary.
+Identity resolution is injected per request, route handlers delegate authorization to
+the same domain policy used by Streamlit and the CLI, and stale writes return an
+explicit conflict. Liveness is public; readiness fails in production until a verified
+identity adapter is installed. There is deliberately no filing/submission endpoint.
+See [docs/service-architecture.md](docs/service-architecture.md).
+
 **Narrative layer.** Narrative drafting is available only while a case is under human
 review. The threshold creates an investigation alert, not an RGS determination or
 filing obligation. Eligible alerts can be sent to AWS
@@ -125,6 +132,17 @@ dbt test --profiles-dir .
 python scripts/train_models.py
 streamlit run app.py
 ```
+
+To run the Phase 5 case API locally with the explicitly development-only identity:
+
+```bash
+AEGIS_SECURITY_MODE=development uvicorn service:app --reload
+# Windows PowerShell: $env:AEGIS_SECURITY_MODE='development'; uvicorn service:app --reload
+```
+
+OpenAPI is available at `http://127.0.0.1:8000/docs`. Docker Compose starts the same
+development service on port 8000. Do not place it on a public network: production
+readiness intentionally fails until the later Clerk adapter verifies every request.
 
 Every path is env-overridable (`DBT_DB_PATH`, `MODELS_ARTIFACTS_DIR`,
 `COMPLIANCE_LOGS_DIR`, `AEGIS_CASE_DB_PATH`, `AEGIS_EVIDENCE_DIR`,
@@ -221,7 +239,7 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 | Job | What it does |
 |---|---|
 | Lint | `ruff check` on correctness rules only (F, E9, W6). Exists because dead code accumulated twice, including a function renamed at its definition but not its call site — which no test could catch, since nothing imports it. |
-| Unit tests | 116 pytest cases over authentication modes, deny-by-default authorization, organization isolation/integrity and legacy migration, prompt minimization, secret redaction, CI permissions/action runtimes, container hardening, PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, fixture stability, and path resolution. |
+| Unit tests | 124 pytest cases over the HTTP service contract, authentication modes, deny-by-default authorization, organization isolation/integrity and legacy migration, prompt minimization, secret redaction, CI permissions/action runtimes, container hardening, PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, fixture stability, and path resolution. |
 | dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`), runs the **real** dbt models and data tests against it — no 500 MB download — then runs the drift gate. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
 | Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard: `.dockerignore` once excluded `models/`, `models_artifacts/` and the DuckDB file, and `docker-compose` bind-mounted the repo over `/app`, hiding it. |
@@ -276,6 +294,10 @@ Read this before drawing conclusions from the metrics above.
   closed until Clerk supplies verified sessions. The SQLite history commits token-free
   identity metadata and is hash-chained, but it is not a signature or external trust
   anchor and is not backed up or retention-managed.
+- **Phase 5 is a service boundary, not a public deployment.** The API provides strict,
+  versioned workflow contracts and safe health/error behavior, but it has no rate
+  limiting, edge gateway, production database, Clerk adapter, load testing, alerting,
+  backup/restore process, or service-level objective. It must not be exposed publicly.
 - **A verified upload receipt is not a compliance opinion.** A matching S3 checksum
   and VersionId establish the remote object observed by this process. The project does
   not continuously reconcile or restore-test the bucket, and its Terraform retention
@@ -293,7 +315,7 @@ Read this before drawing conclusions from the metrics above.
   evaluation. Both are prerequisites for anything operational.
 - **Nothing is actually deployed.** CI builds and verifies the image on every push,
   but promotion to AWS is a manual `deploy.sh` run, and the ECS service is defined
-  with `desired_count = 0` — the infrastructure is provisioned and exercised, not
+  with `desired_count = 0` — the local API exists, but the infrastructure is not
   serving traffic.
 
 ---
@@ -329,6 +351,8 @@ docs/
   str-narrative-design.md  why the hedging blacklist was replaced by grounding checks
   human-review-workflow.md Phase 2 states, invariants, interfaces, and honest boundary
   evidence-integrity.md    Phase 3 preservation, receipts, verification, and limits
+  security-privacy.md      Phase 4A identity, authorization, privacy, and Clerk seam
+  service-architecture.md  Phase 5 HTTP contracts, readiness, errors, and limits
   graph-features.md        entity/graph layer: built, measured, and rejected
   target-encoding.md       causal encodings, bounded card history, and drift references
   materialization.md       why incremental materialization was measured and rejected
@@ -358,6 +382,7 @@ tests/
 terraform/           AWS infrastructure
 .github/workflows/   CI: lint, unit tests, dbt + drift gate, terraform, docker
 app.py               Streamlit investigator dashboard
+service.py           FastAPI case-service boundary (local; production fails closed)
 ```
 
 ## Roadmap status
@@ -373,6 +398,10 @@ S3 checksum/version receipts. Phase 4A (`0.5.0`) adds a provider-neutral identit
 contract, deny-by-default RBAC, organization isolation, production fail-closed mode,
 secret-safe errors, prompt minimization, local file permissions, and TLS-enforced S3
 access. Clerk sign-in/session verification is intentionally deferred until after the
-service boundary is stable. See [docs/security-privacy.md](docs/security-privacy.md).
-The next priorities are service architecture, Clerk integration, and
-champion/challenger operations.
+service boundary is stable. Phase 5 (`0.6.0`) adds that FastAPI boundary, strict
+request/error contracts, request-scoped principal injection, and separate liveness /
+fail-closed readiness. It is locally runnable, not publicly deployed. See
+[docs/security-privacy.md](docs/security-privacy.md) and
+[docs/service-architecture.md](docs/service-architecture.md). The next priorities are
+champion/challenger operations and, once the application boundary is otherwise ready,
+Clerk integration and production deployment hardening.

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.6.0 — 2026-08-29
+
+Phase 5 introduces a testable HTTP service boundary around the existing human-review
+domain without pretending the application is production-deployed.
+
+- Added a FastAPI service factory with injectable request-scoped identity resolution,
+  allowing a later Clerk verifier to supply trusted principals without moving policy
+  into route handlers.
+- Exposed versioned case creation, listing, review, RGS-decision, history, evidence,
+  and integrity endpoints; no filing or regulatory-submission endpoint exists.
+- Added strict request schemas, bounded inputs, optimistic-concurrency contracts,
+  organization isolation, request correlation IDs, no-store/nosniff headers, and
+  stable error responses that do not expose internal exceptions.
+- Split liveness from readiness. Production remains not-ready and protected routes
+  return service-unavailable until a verified identity adapter is configured.
+- Configured the development Compose service to run the API with a container-native
+  health check while retaining the image's production-secure default.
+- Added service-level regression tests covering lifecycle transitions, RBAC,
+  cross-organization access, stale writes, strict parsing, OpenAPI scope, and
+  production fail-closed behavior.
+
 ## 0.5.0 — 2026-08-28
 
 Phase 4A establishes a vendor-neutral security and privacy boundary without coupling

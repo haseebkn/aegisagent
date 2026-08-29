@@ -14,3 +14,5 @@ dbt-core==1.11.11
 dbt-duckdb==1.10.1
 pydantic==2.11.8
 streamlit==1.50.0
+fastapi==0.116.1
+uvicorn==0.35.0
