@@ -71,6 +71,34 @@ Three expanding-window validations produce PR AUC 0.7655, 0.7215, and 0.8373
 (mean 0.7748; worst 0.7215). A simple logistic baseline reaches PR AUC 0.3140 on
 development and 0.1636 on the locked tail. Reports are in [reports/](reports/).
 
+### The ensemble does not win on ranking
+
+Comparing the ensemble only against a weak logistic baseline would overstate what
+stacking buys. Against the strongest single base learner it loses on PR AUC:
+
+| | PR AUC (dev) | PR AUC (locked) | ECE (dev) | ECE (locked) |
+|---|---:|---:|---:|---:|
+| Model 4 (velocity RF) | **0.7835** | **0.6825** | 0.00291 | 0.00320 |
+| Stacked ensemble | 0.7766 | 0.6711 | **0.00082** | **0.00125** |
+
+Model 4 leads by 0.0069 on development and 0.0114 on the locked tail. The
+day-block bootstrap intervals overlap heavily, so neither is significantly better at
+ranking — but the ensemble is behind on both windows, never ahead.
+
+What the ensemble does buy is **calibration**: roughly 3.5x lower expected calibration
+error on development and 2.6x on the locked tail, plus a better Brier score on both.
+That is the stated reason it is retained. The score is shown to a reviewer as a risk
+level and converted to an alert by a threshold, so how well the number matches
+observed frequency is not cosmetic.
+
+Two honest qualifications. Model 4 has the *lower* maximum calibration error on both
+windows (0.2956 vs 0.3615 development), so the ensemble's advantage is in average
+calibration, not worst-bin. And this is a post-hoc justification: the ensemble was
+built first and compared afterwards, not selected because calibration was the
+objective. `scripts/evaluate.py` now prints this comparison on every run and records
+per-model Brier/ECE/MCE in the reports, so the claim is reproducible rather than
+asserted.
+
 ## Operating-point limitations
 
 The 0.7868 threshold maximizes F1 on a dedicated calibration window; it is not

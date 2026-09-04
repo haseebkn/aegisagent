@@ -38,6 +38,15 @@ variation. A simple six-feature logistic baseline reaches only 0.3140 developmen
 and 0.1636 locked-tail PR AUC. Full machine-readable evidence is in
 [`reports/`](reports/).
 
+**The ensemble does not beat its own best base learner on ranking.** Model 4 alone
+scores 0.7835 development and 0.6825 locked — ahead of the ensemble on both windows,
+though the bootstrap intervals overlap. The ensemble is retained because it is
+markedly better *calibrated* (ECE 0.00082 vs 0.00291 on development), which matters
+when the score is shown to a reviewer and converted to an alert by a threshold.
+Benchmarking only against the weak logistic baseline would have hidden a comparison
+the ensemble does not win; `evaluate.py` prints it on every run. The full trade-off,
+including where Model 4 is better, is in [MODEL_CARD.md](MODEL_CARD.md#the-ensemble-does-not-win-on-ranking).
+
 ---
 
 ## How it works

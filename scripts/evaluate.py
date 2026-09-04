@@ -142,18 +142,36 @@ def main():
         print("CAVEAT: prospectively locked in Phase 1, but historically exposed in aggregate.")
     print("=" * 84)
 
+    # Calibration is reported per model, not only for the ensemble. Ranking quality
+    # and calibration disagree here: the strongest single base learner edges the
+    # ensemble on PR AUC while the ensemble is markedly better calibrated. Reporting
+    # only the ensemble, and only against the weak logistic baseline, would hide a
+    # comparison the ensemble does not win outright.
     ranking = {}
     for name, values in probabilities.items():
         interval = day_block_bootstrap_pr_auc(
             y, values, timestamps.to_numpy(), args.bootstrap_samples)
+        model_calibration = calibration_summary(y, values)
         ranking[name] = {
             "pr_auc": float(average_precision_score(y, values)),
             "pr_auc_ci_95_day_block": list(interval),
             "roc_auc": float(roc_auc_score(y, values)),
+            "brier": model_calibration["brier"],
+            "ece": model_calibration["ece"],
+            "mce": model_calibration["mce"],
         }
         print(f"{name:<20} PR AUC={ranking[name]['pr_auc']:.4f} "
               f"95% CI [{interval[0]:.4f}, {interval[1]:.4f}]  "
-              f"ROC AUC={ranking[name]['roc_auc']:.4f}")
+              f"ROC AUC={ranking[name]['roc_auc']:.4f}  "
+              f"Brier={ranking[name]['brier']:.6f}  ECE={ranking[name]['ece']:.5f}")
+
+    best_pr = max(ranking, key=lambda k: ranking[k]["pr_auc"])
+    if best_pr != "ensemble":
+        gap = ranking[best_pr]["pr_auc"] - ranking["ensemble"]["pr_auc"]
+        print(f"\nNOTE: {best_pr} leads the ensemble on PR AUC by {gap:.4f}. "
+              f"The ensemble is retained for calibration "
+              f"(ECE {ranking['ensemble']['ece']:.5f} vs {ranking[best_pr]['ece']:.5f}), "
+              f"not for ranking. See MODEL_CARD.md.")
 
     ensemble = probabilities["ensemble"]
     current = cost_at(y, amounts, ensemble, threshold, args.investigation_cost)
