@@ -103,3 +103,38 @@ def test_healthy_encoding_comparison_is_stable():
     p = [0.2, 0.3, 0.25, 0.15, 0.1]
     assert classify(psi(rng.choice(levels, 20000, p=p),
                         rng.choice(levels, 8000, p=p))) == "stable"
+
+
+@pytest.mark.parametrize("bad_values", [[], [np.nan], [np.inf], [0.0, np.nan]])
+def test_drift_gate_rejects_invalid_data_instead_of_dropping_rows(bad_values):
+    with pytest.raises(ValueError, match="nonempty finite"):
+        compare(pd.DataFrame({"x": [0.0, 1.0]}), pd.DataFrame({"x": bad_values}), ["x"])
+
+
+def test_drift_gate_rejects_missing_or_empty_feature_contract():
+    frame = pd.DataFrame({"x": [0.0, 1.0]})
+    with pytest.raises(ValueError, match="Missing monitored"):
+        compare(frame, frame, ["x", "missing"])
+    with pytest.raises(ValueError, match="At least one"):
+        compare(frame, frame, [])
+
+
+def test_sparse_continuous_feature_drift_is_not_hidden_by_collapsed_quantiles():
+    reference = np.r_[np.zeros(9900), np.arange(1, 101)]
+    assert classify(psi(reference, np.ones(1000))) == "SIGNIFICANT"
+
+
+def test_zero_reference_mean_serializes_as_null_instead_of_infinity():
+    import json
+    results = compare(pd.DataFrame({"x": [0.0, 0.0]}),
+                      pd.DataFrame({"x": [0.0, 0.0]}), ["x"])
+    assert results[0]["mean_ratio"] is None
+    json.dumps(results, allow_nan=False)
+
+
+def test_drift_locked_tail_requires_explicit_unlock(monkeypatch):
+    from scripts import drift
+    monkeypatch.setattr("sys.argv", ["drift", "--current", "locked_evaluation"])
+    with pytest.raises(SystemExit) as caught:
+        drift.main()
+    assert caught.value.code == 2

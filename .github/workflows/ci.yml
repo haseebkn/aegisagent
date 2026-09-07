@@ -53,6 +53,22 @@ jobs:
       - name: Run unit tests
         run: pytest tests/unit -v
 
+      - name: Reviewer demo from an empty workspace
+        run: python -m scripts.demo
+
+  dependency-audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Audit resolved application and test dependencies
+        run: |
+          pip install pip-audit==2.10.1
+          pip-audit -r requirements-dev.txt
+
   dbt-pipeline:
     name: dbt build + data tests
     runs-on: ubuntu-latest
@@ -150,6 +166,7 @@ jobs:
           python tests/fixtures/make_fixture.py --out-dir ci_data
           dbt run --profiles-dir .
           python scripts/train_models.py
+          AEGIS_SECURITY_MODE=development python -m scripts.verify_pipeline --expected-rows 14500
 
       - uses: docker/setup-buildx-action@v4
 
@@ -169,15 +186,22 @@ jobs:
       - name: Image contains the dbt project and model artifacts
         run: |
           docker run --rm aegis-app:ci python -c "
-          import pathlib, sys
+          import os, pathlib
           from scripts.config import resolve_model_dir
           from scripts.inference_engine import load_models
           sql = list(pathlib.Path('/app/models').rglob('*.sql'))
           assert pathlib.Path('/app/dbt_project.yml').exists(), 'dbt project missing'
           import service
           assert service.app.title == 'AegisAgent Case Service'
+          assert os.getuid() == 10001
+          assert pathlib.Path.home() == pathlib.Path('/home/aegis')
+          assert os.environ['AEGIS_SECURITY_MODE'] == 'production'
           assert len(sql) >= 6, f'expected dbt models, found {len(sql)}'
           threshold = load_models()[-1]
           assert 0.0 < threshold < 1.0, threshold
           print(f'OK: {len(sql)} dbt models, artifacts at {resolve_model_dir()}, threshold {threshold:.4f}')
           "
+
+      - name: Container runs the complete offline reviewer demo
+        run: |
+          docker run --rm --network none aegis-app:ci python -m scripts.demo --output-dir /tmp/aegis-demo

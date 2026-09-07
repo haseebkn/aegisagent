@@ -12,6 +12,15 @@ __pycache__/
 .pytest_cache/
 .uv-cache/
 .tools/
+.demo/
+.venv-*/
+.ruff_cache/
+ci_data/
+tmp/
+*.duckdb
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 
 # Credentials and local configuration must not even enter the build context.
 .env
@@ -46,3 +55,4 @@ terraform/.terraform/
 *.tfstate
 *.tfstate.backup
 *.tfvars
+*.tfvars.json

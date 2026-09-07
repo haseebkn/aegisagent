@@ -8,7 +8,7 @@ have something to aggregate, and a realistic class imbalance.
 import argparse
 import csv
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 COLUMNS = ["column00", "trans_date_trans_time", "cc_num", "merchant", "category",
@@ -49,7 +49,7 @@ def generate(rows, start, cards, merchants, fraud_rate, rng, row_offset=0):
             "lat": lat, "long": lon, "city_pop": 1000 * (card % 50 + 1),
             "job": "Tester", "dob": "1985-01-01",
             "trans_num": f"{'t' if row_offset == 0 else 'e'}{i:08d}",
-            "unix_time": int(t.timestamp()),
+            "unix_time": int(t.replace(tzinfo=timezone.utc).timestamp()),
             "merch_lat": round(lat + rng.uniform(-0.5, 0.5), 6),
             "merch_long": round(lon + rng.uniform(-0.5, 0.5), 6),
             "is_fraud": is_fraud,
@@ -76,6 +76,8 @@ def main():
     ap.add_argument("--test-rows", type=int, default=DEFAULT_TEST_ROWS)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
+    if args.train_rows < 1 or args.test_rows < 1:
+        ap.error("Fixture train and test row counts must be positive")
 
     rng = random.Random(args.seed)
     cards = list(range(1, 61))

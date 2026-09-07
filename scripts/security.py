@@ -235,8 +235,17 @@ def require_permission(
     *,
     resource_organization_id: str | None = None,
 ) -> None:
+    if not isinstance(principal, SecurityPrincipal):
+        raise AuthenticationRequired("A trusted security principal is required")
     if not principal.authenticated:
         raise AuthenticationRequired("An authenticated principal is required")
+    if auth_mode() is AuthMode.PRODUCTION and principal.provider == "local-development":
+        raise AuthenticationRequired("Development identities are disabled in production")
+    if (
+        principal.organization_id == LEGACY_UNSCOPED_ORGANIZATION
+        and principal.provider != "local-development"
+    ):
+        raise PermissionDenied("Legacy organization ownership cannot be asserted by an identity")
     if permission not in principal.permissions:
         raise PermissionDenied(
             f"Identity {principal.subject} lacks required permission {permission.value}"
