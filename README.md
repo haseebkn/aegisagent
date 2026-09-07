@@ -470,6 +470,8 @@ scripts/
   model_ops.py         governed compare/promote/rollback/status CLI
   operational_feedback.py aggregate disposition monitoring (never training labels)
   audit_phase1.py      standalone data/artifact audit
+  narrative_rendering.py safe, limited HTML rendering for untrusted narrative drafts
+  demo.py               isolated synthetic reviewer demo with no cloud credentials
 tests/
   *.sql                dbt singular tests (causality, evaluation lock, skew, scale)
   unit/                pytest suite
