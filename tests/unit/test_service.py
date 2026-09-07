@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from scripts.security import (
     ALERT_INGESTOR,
@@ -50,6 +51,26 @@ def test_liveness_is_public_and_sets_security_headers(tmp_path):
     assert response.headers["x-request-id"] == "test-request-1"
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("model_score", True), ("model_score", "0.91"), ("threshold", False),
+])
+def test_alert_request_rejects_coerced_scores(tmp_path, field, value):
+    api = client(tmp_path, identity())
+    payload = {"trans_num": "strict-alert", "model_score": 0.91,
+               "threshold": 0.8, "model_version": "v-api"}
+    payload[field] = value
+    assert api.post("/v1/cases", json=payload).status_code == 422
+    assert api.get("/v1/cases").json()["items"] == []
+
+
+def test_production_rejects_injected_development_identity(tmp_path, monkeypatch):
+    from scripts.security import local_development_principal
+    local_identity = local_development_principal()
+    api = client(tmp_path, local_identity)
+    monkeypatch.setenv("AEGIS_SECURITY_MODE", "production")
+    assert api.get("/v1/cases").status_code == 401
 
 
 def test_case_lifecycle_uses_request_scoped_principal_and_versions(tmp_path):
@@ -198,7 +219,7 @@ def test_production_without_verified_adapter_is_not_ready(tmp_path, monkeypatch)
 def test_openapi_describes_the_case_service_boundary(tmp_path):
     api = client(tmp_path, identity())
     schema = api.get("/openapi.json").json()
-    assert schema["info"]["version"] == "0.7.0"
+    assert schema["info"]["version"] == "0.8.0"
     assert "/v1/cases/{case_id}/rgs-decision" in schema["paths"]
     assert not any("submit" in path or "file" in path for path in schema["paths"])
 

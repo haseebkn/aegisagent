@@ -1,11 +1,11 @@
 """End-to-end pipeline verification.
 
-Every stage runs against real artifacts and real data. In particular, stage 4 no
-longer hands the narrative assistant hardcoded ensemble scores: it pulls the
-highest-risk alert the model artifacts actually produce and drafts from that, so the
-DB -> dbt features -> ensemble -> Bedrock -> local-draft path is exercised
-end to end.
+The default path checks dbt, feature data, actual model scores and an isolated
+case/evidence workflow without cloud calls. --with-narrative additionally invokes
+paid Bedrock drafting using an actual model alert, never a hardcoded score.
 """
+import argparse
+import json
 import os
 import re
 import subprocess
@@ -17,20 +17,24 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.config import ARTIFACTS_DIR, DB_PATH, PROJECT_ROOT
+from scripts.config import ARTIFACTS_DIR, DB_PATH, PROJECT_ROOT, resolve_model_dir
 from scripts.case_management import CaseStore, ReviewerRole
 from scripts.evidence import EvidenceStore
 from scripts.inference_engine import (NoAlertsInSample, load_models, run_inference,
                                       select_highest_risk_alert)
 from scripts.sar_agent import generate_sar_narrative, save_sar_report
+from scripts.security import ALERT_INGESTOR, INVESTIGATOR, local_development_principal
 
 EXPECTED_ROWS = 1852394
 
 
-def run_dbt_tests():
+def run_dbt_tests(expected_rows=EXPECTED_ROWS):
     print("--- 1. RUNNING DBT TESTS ---")
     result = subprocess.run(
-        ["dbt", "test", "--profiles-dir", str(PROJECT_ROOT)],
+        [sys.executable, "-c",
+         "from dbt.cli.main import cli; cli()", "test",
+         "--profiles-dir", str(PROJECT_ROOT), "--vars",
+         json.dumps({"expected_row_count": expected_rows})],
         capture_output=True, text=True, cwd=str(PROJECT_ROOT))
     if result.returncode != 0:
         print("dbt test failed!")
@@ -41,14 +45,14 @@ def run_dbt_tests():
     return True
 
 
-def verify_duckdb_schema():
+def verify_duckdb_schema(expected_rows=EXPECTED_ROWS):
     print("\n--- 2. VERIFYING DUCKDB DATA & SCHEMA ---")
-    con = duckdb.connect(str(DB_PATH))
+    con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
         row_count = con.execute("SELECT COUNT(*) FROM fct_fraud_features").fetchone()[0]
         print(f"Total row count in fct_fraud_features: {row_count:,}")
-        if row_count != EXPECTED_ROWS:
-            print(f"ERROR: Row count {row_count} does not match expected {EXPECTED_ROWS}!")
+        if row_count != expected_rows:
+            print(f"ERROR: Row count {row_count} does not match expected {expected_rows}!")
             return False
         print("Row count matches expected value exactly.")
 
@@ -88,19 +92,27 @@ def verify_duckdb_schema():
 
 def _load_scored_test_sample(limit=10000):
     """Score a real slice of the development holdout with the demo artifacts."""
-    con = duckdb.connect(str(DB_PATH))
+    if type(limit) is not int or limit < 1:
+        raise ValueError("Sample limit must be a positive integer")
+    con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
-        df = con.execute(f"""
+        df = con.execute("""
             SELECT f.*, t.merchant, t.category
             FROM fct_fraud_features f
             LEFT JOIN stg_transactions_test t ON f.trans_num = t.trans_num
             WHERE f.evaluation_role = 'development_holdout'
-            LIMIT {limit}
-        """).df()
+            ORDER BY f.trans_date_trans_time, f.trans_num
+            LIMIT ?
+        """, [limit]).df()
     finally:
         con.close()
 
-    models = load_models(ARTIFACTS_DIR)
+    if df.empty:
+        raise ValueError("No development-holdout rows available for verification")
+    model_dir = resolve_model_dir(ARTIFACTS_DIR)
+    models = load_models(model_dir)
+    df.attrs["model_version"] = model_dir.name
+    df.attrs["alert_threshold"] = float(models[-1])
     meta_probs, p_m2, p_m3, p_m4, triggered = run_inference(df, *models)
     return df, meta_probs, p_m2, p_m3, p_m4, triggered
 
@@ -109,14 +121,14 @@ def verify_inference_bounds():
     print("\n--- 3. VERIFYING INFERENCE SCORING BOUNDARIES ---")
     df, meta_probs, _, _, _, triggered = _load_scored_test_sample(limit=100)
 
-    out_of_bounds = [(i, v) for i, v in enumerate(meta_probs) if not 0.0 < v < 1.0]
+    out_of_bounds = [(i, v) for i, v in enumerate(meta_probs) if not np.isfinite(v) or not 0.0 <= v <= 1.0]
     if out_of_bounds:
         for i, v in out_of_bounds[:5]:
-            print(f"ERROR: Inference score at index {i} is {v} (out of bounds (0.0, 1.0))")
+            print(f"ERROR: Inference score at index {i} is {v} (outside [0.0, 1.0])")
         return False
 
     print(f"Inference verification passed: all {len(meta_probs)} probabilities "
-          f"strictly in (0.0, 1.0).")
+          f"finite and in [0.0, 1.0].")
     print(f"Score range: min={meta_probs.min():.6f} max={meta_probs.max():.6f} "
           f"mean={meta_probs.mean():.6f}")
     print(f"Alerts triggered in sample: {int(np.sum(triggered))}/{len(triggered)}")
@@ -180,8 +192,8 @@ def verify_sar_agent():
             case = case_store.create_alert_case(
                 trans_num=txn["trans_num"],
                 model_score=meta_score,
-                threshold=float(load_models(ARTIFACTS_DIR)[-1]),
-                model_version="pipeline-verification",
+                threshold=df.attrs["alert_threshold"],
+                model_version=df.attrs["model_version"],
                 actor="pipeline-verifier",
             )
             case = case_store.start_review(
@@ -198,6 +210,7 @@ def verify_sar_agent():
                 float(p_m4[idx]),
                 meta_score,
                 narrative,
+                model_version=case.model_version,
                 case_id=case.case_id,
                 actor="pipeline-verifier",
                 actor_role=ReviewerRole.INVESTIGATOR,
@@ -222,17 +235,62 @@ def verify_sar_agent():
     return False
 
 
+def verify_case_workflow():
+    """Exercise local case creation, review, evidence and integrity without cloud calls."""
+    df, meta, _, _, _, triggered = _load_scored_test_sample()
+    idx = select_highest_risk_alert(meta, triggered)
+    identity = local_development_principal(
+        subject="pipeline-verifier", roles=[INVESTIGATOR, ALERT_INGESTOR]
+    )
+    with tempfile.TemporaryDirectory() as temporary:
+        cases = CaseStore(os.path.join(temporary, "cases.sqlite3"), principal=identity)
+        case = cases.create_alert_case(
+            trans_num=str(df.iloc[idx]["trans_num"]),
+            model_score=float(meta[idx]),
+            threshold=df.attrs["alert_threshold"],
+            model_version=df.attrs["model_version"],
+        )
+        case = cases.start_review(
+            case.case_id,
+            rationale="Scripted synthetic-data review for the local verification workflow.",
+            expected_version=case.version,
+        )
+        receipt = EvidenceStore(os.path.join(temporary, "evidence")).preserve_text(
+            case_id=case.case_id, evidence_type="model_observation",
+            content=json.dumps({
+                "purpose": "synthetic pipeline verification, not an RGS finding",
+                "model_score": case.model_score, "model_version": case.model_version,
+            }, sort_keys=True),
+        )
+        cases.attach_evidence(case.case_id, receipt=receipt, expected_version=case.version)
+        result = cases.verify_integrity(case.case_id)
+        if not result["ok"]:
+            raise ValueError("Case/evidence integrity verification failed")
+        print(f"Case workflow verified: {result['events_verified']} events, "
+              f"{result['evidence_verified']} evidence artifact; no RGS decision recorded.")
+    return True
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expected-rows", type=int, default=EXPECTED_ROWS)
+    parser.add_argument("--with-narrative", action="store_true",
+                        help="Also invoke paid AWS Bedrock narrative drafting")
+    args = parser.parse_args()
+    if args.expected_rows < 1:
+        parser.error("--expected-rows must be positive")
     print("=" * 70)
     print("               AEGISAGENT PIPELINE VERIFICATION")
     print("=" * 70)
 
     stages = [
-        ("dbt tests", run_dbt_tests),
-        ("DuckDB checks", verify_duckdb_schema),
+        ("dbt tests", lambda: run_dbt_tests(args.expected_rows)),
+        ("DuckDB checks", lambda: verify_duckdb_schema(args.expected_rows)),
         ("Inference bounds", verify_inference_bounds),
-        ("Narrative drafting", verify_sar_agent),
+        ("Case and evidence workflow", verify_case_workflow),
     ]
+    if args.with_narrative:
+        stages.append(("Optional Bedrock narrative drafting", verify_sar_agent))
     for i, (name, fn) in enumerate(stages, start=1):
         if not fn():
             print(f"\nPipeline verification FAILED at Step {i} ({name}).")

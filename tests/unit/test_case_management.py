@@ -59,10 +59,44 @@ def test_created_case_starts_open_and_unassigned(store):
     assert case.version == 1
 
 
+def test_case_operations_close_database_connections(tmp_path, monkeypatch):
+    connections = []
+    connect = sqlite3.connect
+
+    def track_connection(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", track_connection)
+    store = CaseStore(tmp_path / "cases.sqlite3")
+    case = create_case(store)
+    assert store.get_case(case.case_id).version == 1
+    with pytest.raises(DuplicateAlert):
+        create_case(store)
+    assert len(connections) >= 4
+    for connection in connections:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")
+
+
 def test_transaction_can_have_only_one_case(store):
     create_case(store)
     with pytest.raises(DuplicateAlert):
         create_case(store)
+
+
+@pytest.mark.parametrize("value", ["false", "true", 0, 1, None])
+def test_rgs_decision_requires_an_actual_boolean(store, value):
+    case = start_case(store, create_case(store))
+    with pytest.raises(ValidationError, match="boolean"):
+        store.record_rgs_decision(
+            case.case_id, reached=value, actor="authorized-reviewer",
+            actor_role=ReviewerRole.AUTHORIZED_RGS_REVIEWER,
+            rationale="Review completed using the documented available evidence.",
+            expected_version=case.version,
+        )
+    assert store.get_case(case.case_id).status == "under_review"
 
 
 def test_start_review_assigns_the_human_and_increments_version(store):

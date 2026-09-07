@@ -4,8 +4,13 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+.venv-*/
 .uv-cache/
 .tools/
+.demo/
+.pytest_cache/
+.ruff_cache/
+tmp/
 venv/
 ENV/
 env/
@@ -17,6 +22,9 @@ env/
 *.duckdb
 *.db
 *.sqlite
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 
 # --- Confidential Compliance Records ---
 # Compliance logs contain generated STRs with sensitive user data (card numbers, names, locations)
@@ -47,6 +55,7 @@ logs/
 *.tfstate.backup
 *.tfvars
 *.tfvars.json
+terraform/backend.hcl
 
 # --- Credentials & Configs ---
 .env

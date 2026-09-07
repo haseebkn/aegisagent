@@ -1,0 +1,6 @@
+# Copy to an untracked backend.hcl and choose a bucket and lock table you own.
+bucket         = "your-provisioned-state-bucket"
+key            = "aegis-agent/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "your-provisioned-lock-table"
+encrypt        = true

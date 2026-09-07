@@ -5,10 +5,10 @@ import sys
 
 import duckdb
 import numpy as np
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.config import (ARTIFACTS_DIR, DB_PATH, FEAT_M2, FEAT_M3, FEAT_M4,
+from scripts.config import (ARTIFACTS_DIR, DB_PATH, FEAT_M2, FEAT_M3, FEAT_M4, MODEL_REGISTRY_PATH,
                             resolve_model_dir)
 
 # Union of every column the three base models consume, so validation covers what
@@ -34,7 +34,19 @@ class TransactionFeatures(BaseModel):
 
 def load_models(artifacts_dir=None):
     load_dir = resolve_model_dir(artifacts_dir)
+    # Explicit version paths are used by challenger evaluation and must receive the
+    # same integrity checks as the default serving pointer, before unpickling.
+    registry_path = (
+        MODEL_REGISTRY_PATH if load_dir.parent == ARTIFACTS_DIR.resolve()
+        else load_dir.parent / "registry.json"
+    )
+    if registry_path.exists():
+        from scripts.model_registry import load_registry, verify_registered_artifacts
+
+        verify_registered_artifacts(load_registry(registry_path), load_dir.parent, load_dir.name)
     print(f"Loading models from: {load_dir}")
+
+    threshold = _read_threshold(load_dir)
 
     model_2 = joblib_load(load_dir / "model_2_geo_rf.joblib")
     model_3 = joblib_load(load_dir / "model_3_cat_xgb.joblib")
@@ -42,9 +54,21 @@ def load_models(artifacts_dir=None):
     scaler_4 = joblib_load(load_dir / "model_4_scaler.joblib")
     meta_model = joblib_load(load_dir / "meta_model.joblib")
 
-    thresh_path = load_dir / "meta_threshold.txt"
-    threshold = float(thresh_path.read_text().strip()) if thresh_path.exists() else 0.5
     return model_2, model_3, model_4, scaler_4, meta_model, threshold
+
+
+def _validate_threshold(threshold):
+    if isinstance(threshold, (bool, str)) or not np.isscalar(threshold):
+        raise ValueError("Decision threshold must be a finite number between zero and one")
+    if not np.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ValueError("Decision threshold must be a finite number between zero and one")
+    return float(threshold)
+
+
+def _read_threshold(directory):
+    # A threshold belongs to its model bundle; inventing 0.5 changes alert policy.
+    threshold = float((directory / "meta_threshold.txt").read_text(encoding="utf-8").strip())
+    return _validate_threshold(threshold)
 
 
 def joblib_load(path):
@@ -53,11 +77,11 @@ def joblib_load(path):
 
 
 def validate_frame(df):
-    """Vectorised pre-checks, then a Pydantic pass over the offending rows only.
-
-    The previous implementation ran a Pydantic constructor inside df.iterrows() for
-    every row, which is fine for a 100-row smoke test and unusable for a batch.
-    """
+    """Validate every scored row using vectorized numeric and domain checks."""
+    if df.empty:
+        raise ValueError("Input frame must contain at least one transaction")
+    if df.columns.duplicated().any():
+        raise ValueError("Input frame contains duplicate column names")
     missing = [c for c in SCORED_FEATURES + ['trans_num'] if c not in df.columns]
     if missing:
         raise ValueError(f"Input frame is missing required columns: {missing}")
@@ -65,6 +89,8 @@ def validate_frame(df):
     if df['trans_num'].isna().any():
         bad = df.index[df['trans_num'].isna()].tolist()[:5]
         raise ValueError(f"Validation failed: trans_num is null at rows {bad}")
+    if not df['trans_num'].map(lambda value: isinstance(value, str) and bool(value.strip())).all():
+        raise ValueError("Validation failed: trans_num must contain nonempty strings")
 
     numeric = df[SCORED_FEATURES]
     if not np.isfinite(numeric.to_numpy(dtype=float)).all():
@@ -72,27 +98,21 @@ def validate_frame(df):
                     if not np.isfinite(df[c].to_numpy(dtype=float)).all()]
         raise ValueError(f"Validation failed: non-finite values in {bad_cols}")
 
-    # Bounded columns get an explicit contract check via Pydantic on a sample; a
-    # violation anywhere means the upstream dbt layer changed shape.
-    for idx in df.index[:1].tolist() + df.index[-1:].tolist():
-        row = df.loc[idx]
-        try:
-            TransactionFeatures(
-                trans_num=str(row['trans_num']),
-                amt=float(row['amt']),
-                distance_km=float(row['distance_km']),
-                txns_24h=int(row['txns_24h']),
-                txns_7d=int(row['txns_7d']),
-                category_risk=float(row['category_risk']),
-                state_risk=float(row['state_risk']),
-                merchant_risk=float(row['merchant_risk']),
-                night=int(row['night']),
-                is_online=int(row['is_online']),
-                hour=int(row['hour']),
-                day_of_week=int(row['day_of_week']),
-            )
-        except ValidationError as e:
-            raise ValueError(f"Input feature validation failed at row {idx}: {e}") from e
+    bounds = {
+        "amt": (0, np.inf), "distance_km": (0, np.inf),
+        "txns_24h": (0, np.inf), "txns_7d": (0, np.inf), "card_txn_cnt": (0, np.inf),
+        "card_mean_amt": (0, np.inf), "card_std_amt": (0, np.inf),
+        "category_risk": (0, 1), "state_risk": (0, 1), "merchant_risk": (0, 1),
+        "night": (0, 1), "is_online": (0, 1), "hour": (0, 23), "day_of_week": (0, 6),
+        "hour_sin": (-1, 1), "hour_cos": (-1, 1),
+    }
+    integer_columns = {"txns_24h", "txns_7d", "card_txn_cnt", "night", "is_online", "hour", "day_of_week"}
+    for column, (lower, upper) in bounds.items():
+        values = df[column].to_numpy(dtype=float)
+        if ((values < lower) | (values > upper)).any():
+            raise ValueError(f"Input feature validation failed: {column} is outside its bounds")
+        if column in integer_columns and (values != np.floor(values)).any():
+            raise ValueError(f"Input feature validation failed: {column} must contain integers")
 
 
 class NoAlertsInSample(RuntimeError):
@@ -109,11 +129,19 @@ def select_highest_risk_alert(meta_probs, triggered):
     threshold—would fabricate a model alert. The gate establishes alert eligibility
     only; it does not establish RGS or a reporting obligation.
     """
+    meta_probs = np.asarray(meta_probs, dtype=float)
+    triggered = np.asarray(triggered)
+    if meta_probs.ndim != 1 or triggered.shape != meta_probs.shape:
+        raise ValueError("Alert scores and flags must be matching one-dimensional arrays")
+    if not np.isfinite(meta_probs).all() or ((meta_probs < 0) | (meta_probs > 1)).any():
+        raise ValueError("Alert scores must be finite probabilities")
+    if triggered.dtype != np.bool_:
+        raise ValueError("Alert flags must be booleans")
     alert_idx = np.flatnonzero(triggered)
     if alert_idx.size == 0:
         raise NoAlertsInSample(
             f"No transaction in this sample of {len(meta_probs)} breached the "
-            f"decision threshold (max score {meta_probs.max():.4f}). A narrative draft "
+            f"decision threshold (max score {meta_probs.max() if meta_probs.size else 0:.4f}). A narrative draft "
             f"is only generated for an alert. Increase the sample size so it contains one."
         )
     return int(alert_idx[np.argmax(meta_probs[alert_idx])])
@@ -123,14 +151,19 @@ def run_inference(df, model_2, model_3, model_4, scaler_4, meta_model, threshold
     validate_frame(df)
 
     if threshold is None:
-        thresh_path = resolve_model_dir() / "meta_threshold.txt"
-        threshold = float(thresh_path.read_text().strip()) if thresh_path.exists() else 0.5
+        raise ValueError("Pass the decision threshold loaded with this model bundle")
+    threshold = _validate_threshold(threshold)
 
     p_m2 = model_2.predict_proba(df[FEAT_M2].values)[:, 1]
     p_m3 = model_3.predict_proba(df[FEAT_M3].values)[:, 1]
     p_m4 = model_4.predict_proba(scaler_4.transform(df[FEAT_M4].values))[:, 1]
 
     meta_p = meta_model.predict_proba(np.column_stack([p_m2, p_m3, p_m4]))[:, 1]
+    for probabilities in (p_m2, p_m3, p_m4, meta_p):
+        if probabilities.shape != (len(df),) or not np.isfinite(probabilities).all() or (
+            (probabilities < 0) | (probabilities > 1)
+        ).any():
+            raise ValueError("Model produced invalid probabilities")
     triggered_alert = (meta_p >= threshold).astype(bool)
 
     return meta_p, p_m2, p_m3, p_m4, triggered_alert

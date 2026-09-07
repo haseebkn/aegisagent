@@ -50,7 +50,7 @@ _REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 
 
 class StrictRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, strict=True)
 
 
 class AlertCreate(StrictRequest):
@@ -94,7 +94,7 @@ def create_app(
 
     app = FastAPI(
         title="AegisAgent Case Service",
-        version="0.7.0",
+        version="0.8.0",
         description=(
             "Human-review case workflow for model-generated fraud alerts. "
             "This API does not file or submit regulatory reports."
@@ -151,13 +151,13 @@ def create_app(
 
     @app.exception_handler(ValidationError)
     async def domain_validation(request: Request, exc: ValidationError):
-        return _problem(request, status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid_request", str(exc))
+        return _problem(request, status.HTTP_422_UNPROCESSABLE_CONTENT, "invalid_request", str(exc))
 
     @app.exception_handler(RequestValidationError)
     async def request_validation(request: Request, _exc: RequestValidationError):
         return _problem(
             request,
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
             "invalid_request",
             "Request body or parameters are invalid.",
         )
@@ -175,7 +175,12 @@ def create_app(
         )
 
     def principal(request: Request) -> SecurityPrincipal:
-        return app.state.principal_resolver(request)
+        identity = app.state.principal_resolver(request)
+        if not isinstance(identity, SecurityPrincipal) or not identity.authenticated:
+            raise AuthenticationRequired("A verified identity is required")
+        if auth_mode() is AuthMode.PRODUCTION and identity.provider == "local-development":
+            raise AuthenticationRequired("Development identities are disabled in production")
+        return identity
 
     def store(identity: SecurityPrincipal) -> CaseStore:
         return CaseStore(app.state.case_db_path, principal=identity)
@@ -231,8 +236,8 @@ def create_app(
         limit: int = Query(default=100, ge=1, le=200),
         identity: SecurityPrincipal = Depends(principal),
     ):
-        records = store(identity).list_cases(case_status, principal=identity)
-        return {"items": [case_to_dict(item) for item in records[:limit]], "limit": limit}
+        records = store(identity).list_cases(case_status, principal=identity, limit=limit)
+        return {"items": [case_to_dict(item) for item in records], "limit": limit}
 
     @app.get("/v1/cases/{case_id}", tags=["cases"])
     def get_case(case_id: str, identity: SecurityPrincipal = Depends(principal)):

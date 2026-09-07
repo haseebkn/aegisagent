@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.0 — 2026-09-07
+
+Portfolio audit and reproducible reviewer workflow.
+
+- Validate registry projections against event replay and model files before loading;
+  reject unsafe version paths and serialize local registry writes.
+- Independently rescore the development holdout before accepting a governed comparison
+  and bind its data fingerprint, artifacts, policy, metrics and report digest.
+- Validate every inference row, thresholds and output probabilities; reject missing or
+  nonfinite drift inputs and fix sparse-distribution PSI and constant-score calibration.
+- Freeze target encodings before internal holdouts and rolling validation; correct
+  calendar-day exposure, capacity analysis and historical graph self-exclusion.
+- Detect case projection/history tampering without silently repairing modern ledgers;
+  authorize narrative evidence before I/O and bind it to the case's scored model.
+- Tighten principal/request validation, escape dynamic narrative HTML, and reject
+  unversioned S3 receipts.
+- Add an isolated synthetic demo, optional cloud verification, localhost-only Compose,
+  portable Terraform backend settings and explicit reference-provisioning preflight.
+- Add behavioral regression coverage, reviewer guidance and honest historical-results
+  disclosures. Existing research artifacts and the locked evaluation tail are preserved.
+- Close SQLite connections explicitly on every path, include the dbt macros in the
+  image, and exercise the complete container demo with networking disabled.
+- Patch vulnerable application/test dependencies and add a resolved dependency audit
+  to CI; replace deprecated Streamlit layout arguments.
+
 ## 0.7.0 — 2026-08-29
 
 Phase 6 adds governed champion/challenger operations and a deliberately non-training

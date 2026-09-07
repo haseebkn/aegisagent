@@ -1,10 +1,16 @@
 # AegisAgent model card
 
-**Version:** 0.7.0
+**Version:** 0.8.0
 
 **Status:** portfolio/research baseline
 
-**Last updated:** 2026-08-29
+**Last updated:** 2026-09-07
+
+The metrics below are retained historical Phase 1 results. Release 0.8.0 freezes
+internal holdout encoding maps and corrects exposure/capacity calculations. It does
+not relabel historical metrics as results from the revised training code. The locked
+tail was not reopened during the audit; new development evaluation must accompany a
+future governed retraining. Fixture-demo scores establish workflow correctness only.
 
 ## Model overview
 

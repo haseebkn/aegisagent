@@ -1,5 +1,7 @@
 # AegisAgent: Fraud Detection & Investigation Narrative Drafting
 
+[![CI](https://github.com/haseebkn/aegisagent/actions/workflows/ci.yml/badge.svg)](https://github.com/haseebkn/aegisagent/actions/workflows/ci.yml)
+
 AegisAgent scores historical card transactions with a stacked ML ensemble, creates
 investigation alerts, and can draft a grounded 5W+H narrative for human review. It is
 a portfolio/research project built on a public synthetic dataset—not a production
@@ -8,13 +10,41 @@ not a reasonable-grounds-to-suspect (RGS) determination. See
 [Regulatory scope](docs/regulatory-scope.md), [MODEL_CARD.md](MODEL_CARD.md), and
 [Scope & limitations](#scope--limitations).
 
-The models originate from an MSc capstone (*Feature-Enhanced Machine Learning Models
+The models originate from a Master of Data Science (MDSc) capstone (*Feature-Enhanced Machine Learning Models
 for Credit Card Fraud Detection*, Memorial University of Newfoundland); this repo is
 the data-engineering, serving and reporting layer built around them.
 
+## Start here
+
+For hiring reviewers: [portfolio overview and interview walkthrough](docs/portfolio.md),
+[audit findings and fixes](docs/audit-2026-09.md), and [model card](MODEL_CARD.md).
+The project demonstrates temporal feature engineering, model validation, case workflow
+design, authorization, evidence integrity, and controlled model promotion.
+
+Run the complete synthetic demo after installing dependencies:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m scripts.demo --serve
+```
+
+This creates 14,500 fixture transactions in a new `.demo/run-*` directory, builds the
+real dbt feature mart, trains a small model bundle, verifies inference and case/evidence
+integrity, runs the drift gate, then starts the dashboard at `http://127.0.0.1:8501`.
+Omit `--serve` for automated verification. No dataset download or cloud credentials
+are needed. Fixture scores verify software behavior; they are not research results.
+Python 3.11 is the CI/container reference environment.
+
 ---
 
-## Current temporal evaluation
+## Historical temporal evaluation
+
+These are retained Phase 1 measurements, not results regenerated for release 0.8.0.
+The September audit tightened internal validation by freezing label encodings at each
+fit boundary and corrected exposure/capacity calculations. The checked-in reports
+remain historical evidence; they must be regenerated on development data after a
+governed retraining before describing the revised training pipeline's performance.
+The locked tail was not reopened during this audit.
 
 Phase 1 divides `fraudTest.csv` chronologically: the first 75% is the development
 holdout and the final 25% is a prospectively locked evaluation tail. The tail is not
@@ -41,8 +71,9 @@ and 0.1636 locked-tail PR AUC. Full machine-readable evidence is in
 **The ensemble does not beat its own best base learner on ranking.** Model 4 alone
 scores 0.7835 development and 0.6825 locked — ahead of the ensemble on both windows,
 though the bootstrap intervals overlap. The ensemble is retained because it is
-markedly better *calibrated* (ECE 0.00082 vs 0.00291 on development), which matters
-when the score is shown to a reviewer and converted to an alert by a threshold.
+lower in aggregate calibration error (ECE 0.00082 vs 0.00291 on development).
+That aggregate result is a research trade-off, not proof that alert probabilities are
+reliable: the alerting region remains overconfident, as documented below.
 Benchmarking only against the weak logistic baseline would have hidden a comparison
 the ensemble does not win; `evaluate.py` prints it on every run. The full trade-off,
 including where Model 4 is better, is in [MODEL_CARD.md](MODEL_CARD.md#the-ensemble-does-not-win-on-ranking).
@@ -74,10 +105,12 @@ materializing them is 33% slower ([docs/materialization.md](docs/materialization
 **Model layer.** Three base learners (geographic RF, category XGBoost, velocity RF)
 feed a logistic-regression meta-learner. Model fitting uses a chronological 70% base /
 15% blend / 15% threshold-selection split within `fraudTrain.csv`. All model inputs
-are available at event time: target encodings use earlier labels only, card histories
+exclude current/future events: target encodings use earlier labels only, card histories
 use the prior 90 days, and velocity excludes the current event. `fraudTest.csv` was
 historically inspected, so even the prospectively locked tail is not described as a
-pristine independent test.
+pristine independent test. The synthetic dataset has no label-arrival timestamps;
+availability of earlier fraud labels is an explicit simulation assumption. Release
+0.8.0 freezes label maps before blend, calibration, and rolling-validation windows.
 
 **Human-review layer.** A threshold-breaching transaction can create one persisted
 case. The enforced workflow is `alert_open → under_review → rgs_not_reached /
@@ -170,12 +203,12 @@ challengers and leave serving unchanged:
 
 ```bash
 # Use a dedicated local governance identity; production still requires Clerk.
-AEGIS_DEV_ROLES=model_governance_reviewer python scripts/model_ops.py status
-AEGIS_DEV_ROLES=model_governance_reviewer python scripts/model_ops.py compare --candidate v_YYYYMMDD_HHMMSS
-AEGIS_DEV_ROLES=model_governance_reviewer python scripts/model_ops.py promote \
+AEGIS_DEV_ROLES=model_governance_reviewer python -m scripts.model_ops status
+AEGIS_DEV_ROLES=model_governance_reviewer python -m scripts.model_ops compare --candidate v_YYYYMMDD_HHMMSS
+AEGIS_DEV_ROLES=model_governance_reviewer python -m scripts.model_ops promote \
   --candidate v_YYYYMMDD_HHMMSS \
   --rationale "Candidate passed the approved development governance gates."
-AEGIS_DEV_ROLES=model_governance_reviewer python scripts/operational_feedback.py \
+AEGIS_DEV_ROLES=model_governance_reviewer python -m scripts.operational_feedback \
   --output reports/operational_feedback.json
 ```
 
@@ -191,19 +224,26 @@ Every path is env-overridable (`DBT_DB_PATH`, `MODELS_ARTIFACTS_DIR`,
 
 The image carries the dbt project, scripts and model artifacts, so `models_artifacts/`
 must exist before you build. One version is ~244 MB of joblib, deliberately not in git.
-`train_models.py` prunes superseded versions (`--keep`, default 1) so the image never
-accumulates dead ones:
+Registered candidates and archived champions are retained for review and rollback;
+the image includes every version in the build artifact directory. Use an isolated
+artifact store for fixture builds:
 
 ```bash
 dbt run --profiles-dir .
 python scripts/train_models.py
 docker build -t aegis-app:latest .
-docker run --rm -v "$PWD/aegis_db.duckdb:/app/aegis_db.duckdb" aegis-app:latest
+docker run --rm -e AEGIS_SECURITY_MODE=development \
+  -v "$PWD/aegis_db.duckdb:/app/aegis_db.duckdb" \
+  -v "$PWD/fraudTrain.csv:/app/fraudTrain.csv:ro" \
+  -v "$PWD/fraudTest.csv:/app/fraudTest.csv:ro" aegis-app:latest \
+  sh -c 'dbt run --profiles-dir . && python -m scripts.verify_pipeline'
 ```
 
-The DuckDB file and raw CSVs are data and are mounted at runtime. CI runs this whole
-sequence against the fixture dataset on every push, which is how it verifies the
-image is genuinely self-contained rather than relying on a bind mount. The image's
+The DuckDB file and raw CSVs are data and are mounted at runtime. Rebuilding dbt views
+inside the container replaces host-specific CSV paths; use a copy of the research
+database if you do not want to rebuild that file. CI separately trains fixture models,
+verifies the host pipeline, then checks the image's code and model loading without
+bind mounts. The image's
 command runs `scripts/verify_pipeline.py` and exits; it does **not** serve the
 Streamlit dashboard or expose a real-time scoring API.
 
@@ -277,7 +317,7 @@ and the mechanism are in [docs/graph-features.md](docs/graph-features.md).
 | Job | What it does |
 |---|---|
 | Lint | `ruff check` on correctness rules only (F, E9, W6). Exists because dead code accumulated twice, including a function renamed at its definition but not its call site — which no test could catch, since nothing imports it. |
-| Unit tests | 135 pytest cases over model-governance authorization and report validation, paired comparison, operational-feedback semantics, trusted alert ingestion, the HTTP service contract, authentication modes, deny-by-default authorization, tenant-scoped transaction identity and legacy migration, prompt minimization, secret redaction, CI permissions/action runtimes, container hardening, PII masking, grounding, alert gates, the human-review state machine, evidence integrity/migration/archive receipts, temporal contracts, rolling splits, uncertainty/calibration helpers, drift statistics, fixture stability, and path resolution. |
+| Unit tests | Behavioral coverage of model governance, comparison evidence, inference validation, API authorization, case/evidence integrity, privacy, temporal splits, calibration, capacity, drift, and demonstration isolation. Also runs the synthetic end-to-end demo and dashboard interaction smoke test. |
 | dbt pipeline | Generates a small fixture dataset (`tests/fixtures/make_fixture.py`), runs the **real** dbt models and data tests against it — no 500 MB download — then runs the drift gate. |
 | Terraform | `fmt -check`, `init -backend=false`, `validate`. No AWS credentials, never touches remote state. |
 | Docker | Trains artifacts from the fixture, builds the image, and asserts it is self-contained — dbt project present, artifacts loadable, **with no bind mounts**. Regression guard: `.dockerignore` once excluded `models/`, `models_artifacts/` and the DuckDB file, and `docker-compose` bind-mounted the repo over `/app`, hiding it. |
@@ -290,7 +330,7 @@ without executing a single job.
 
 ## Data quality controls
 
-`dbt test` runs 15 checks. Five are worth calling out because they encode bugs
+`dbt test` runs 17 checks. Five are worth calling out because they encode bugs
 this project actually shipped:
 
 | Test | Guards against |
@@ -302,10 +342,11 @@ this project actually shipped:
 | `assert_no_degenerate_feature_scale` | Unstable early-history z-scores and divide-by-near-zero values reaching narrative prompts as facts. |
 
 `scripts/verify_pipeline.py` runs the same skew check plus an end-to-end pass:
-dbt tests → schema/row checks → inference bounds → narrative drafting on the
+dbt tests → schema/row checks → inference bounds → case/evidence integrity on the
 highest-scoring **alert** in the development window. If the sample contains no transaction
 above the threshold it fails rather than drafting from an ordinary one. This gate
-does not determine whether RGS has been reached.
+does not determine whether RGS has been reached. Add `--with-narrative` to explicitly
+invoke paid Bedrock drafting; the default verifier makes no cloud requests.
 
 ---
 
@@ -357,7 +398,7 @@ Read this before drawing conclusions from the metrics above.
   explicitly blocked from training-label use because RGS is not fraud, reviewed alerts
   are selected by the model, and disposition context is incomplete in the feature mart.
 - **Nothing is actually deployed.** CI builds and verifies the image on every push,
-  but promotion to AWS is a manual `deploy.sh` run, and the ECS service is defined
+  `bash deploy.sh --check` performs a local preflight, and the ECS service is defined
   with `desired_count = 0` — the local API exists, but the infrastructure is not
   serving traffic.
 
@@ -381,7 +422,13 @@ container exits after verification, and no load balancer or scoring endpoint exi
 - **VPC** with a public subnet, IGW and an egress-only security group.
 - **ECR** with scan-on-push and untagged-image expiry.
 - **ECS Fargate** cluster, task definition and service (`desired_count = 0`).
-- Remote state in S3 with DynamoDB locking.
+- Partial S3 backend configuration with DynamoDB locking. Supply your own settings
+  using `terraform/backend.hcl.example`; no account-specific state target is committed.
+
+`bash deploy.sh --apply-reference` explicitly provisions this dormant reference using
+your backend configuration. It can create paid resources and retention-locked objects;
+it does not make the application production-ready. Region/project variables are shared
+with Terraform and the ECS image tag records both the model version and Git revision.
 
 ---
 
@@ -450,9 +497,11 @@ service boundary is stable. Phase 5 (`0.6.0`) adds that FastAPI boundary, strict
 request/error contracts, request-scoped principal injection, and separate liveness /
 fail-closed readiness. It is locally runnable, not publicly deployed. See
 [docs/security-privacy.md](docs/security-privacy.md) and
-[docs/service-architecture.md](docs/service-architecture.md). The next priorities are
 [docs/service-architecture.md](docs/service-architecture.md). Phase 6 (`0.7.0`) adds
 candidate registration, paired champion comparison, authorized promotion, rollback,
 and aggregate analyst-disposition monitoring. Once the remaining application boundary
 is ready, the next priorities are Clerk integration and production deployment,
 observability, persistence, and recovery hardening.
+
+Release `0.8.0` audits and repairs these foundations and adds an isolated reviewer demo.
+See [the audit report](docs/audit-2026-09.md) for demonstrated fixes and remaining limits.

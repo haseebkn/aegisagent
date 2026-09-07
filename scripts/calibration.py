@@ -27,17 +27,23 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import ARTIFACTS_DIR, DB_PATH, resolve_model_dir
+from scripts.evaluation_utils import validate_binary_probabilities
 from scripts.inference_engine import load_models, run_inference
 
 
 def reliability(y, p, bins=10, strategy="quantile"):
     """Per-bin predicted vs observed frequency."""
+    y, p = validate_binary_probabilities(y, p)
+    if not isinstance(bins, int) or bins < 1 or strategy not in {"quantile", "uniform"}:
+        raise ValueError("Use positive bins and either quantile or uniform strategy")
     if strategy == "quantile":
         edges = np.unique(np.quantile(p, np.linspace(0, 1, bins + 1)))
     else:
         edges = np.linspace(0, 1, bins + 1)
     if len(edges) < 2:
-        return []
+        # A constant score still has calibration error. Returning an empty table
+        # incorrectly labelled even a constant 99% fraud score perfectly calibrated.
+        edges = np.array([0.0, 1.0])
 
     idx = np.clip(np.digitize(p, edges[1:-1], right=False), 0, len(edges) - 2)
     rows = []
@@ -59,14 +65,15 @@ def reliability(y, p, bins=10, strategy="quantile"):
 
 
 def ece_mce(rows, total):
-    if not rows:
-        return 0.0, 0.0
+    if not rows or total < 1 or sum(r["count"] for r in rows) != total:
+        raise ValueError("Reliability bins must cover a positive population")
     ece = sum(r["count"] / total * abs(r["gap"]) for r in rows)
     mce = max(abs(r["gap"]) for r in rows)
     return float(ece), float(mce)
 
 
 def brier(y, p):
+    y, p = validate_binary_probabilities(y, p)
     return float(np.mean((p - y) ** 2))
 
 
@@ -106,7 +113,8 @@ def main():
     print(f"Transactions: {len(y):,}   base rate: {base_rate:.5f}\n")
     print(f"  Brier score           {b_model:.6f}")
     print(f"  Brier (base rate)     {b_base:.6f}")
-    print(f"  Skill vs base rate    {1 - b_model / b_base:+.2%}")
+    skill = f"{1 - b_model / b_base:+.2%}" if b_base else "undefined (single-class window)"
+    print(f"  Skill vs base rate    {skill}")
     print(f"  ECE                   {ece:.5f}")
     print(f"  MCE                   {mce:.5f}")
 
@@ -154,10 +162,12 @@ def main():
     if args.output:
         with open(args.output, "w") as f:
             json.dump({"model_version": resolve_model_dir().name,
+                       "evaluation_role": args.window,
+                       "historically_pristine": False,
                        "base_rate": base_rate, "brier": b_model,
                        "brier_base_rate": b_base, "ece": ece, "mce": mce,
                        "reliability": rows,
-                       "alerting_region_reliability": alert_rows}, f, indent=2)
+                       "alerting_region_reliability": alert_rows}, f, indent=2, allow_nan=False)
         print(f"\nReport written to {args.output}")
 
 

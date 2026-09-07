@@ -1,13 +1,20 @@
 #!/usr/bin/env bash
-# Manual cloud deployment: build, push to ECR, apply Terraform.
+# Explicit reference-infrastructure provisioning; this does not deploy a usable app.
 #
-# This is a deliberate manual step, not CI. It is idempotent and safe to re-run.
+# --check validates local artifacts without provisioning or paid cloud requests.
 set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
 PROJECT_NAME="${PROJECT_NAME:-aegis-agent}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARTIFACTS_DIR="${MODELS_ARTIFACTS_DIR:-$REPO_ROOT/models_artifacts}"
+MODE="${1:---check}"
+if [[ "$MODE" != "--check" && "$MODE" != "--apply-reference" ]]; then
+  echo "Usage: bash deploy.sh [--check|--apply-reference]"
+  exit 2
+fi
+export TF_VAR_aws_region="$AWS_REGION"
+export TF_VAR_project_name="$PROJECT_NAME"
 
 echo "======================================================================"
 echo "               AEGISAGENT CLOUD DEPLOYMENT"
@@ -18,9 +25,14 @@ echo "======================================================================"
 # either fails on COPY or, worse, ships whatever stale version happens to be on
 # disk. Verify the artifacts exist and match the version pointer before building.
 echo "--- Step 0: Preflight ---"
-for tool in terraform aws docker; do
+for tool in python docker; do
   command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: '$tool' not on PATH."; exit 1; }
 done
+if [ "$ARTIFACTS_DIR" != "$REPO_ROOT/models_artifacts" ]; then
+  echo "ERROR: Docker builds use models_artifacts/ in this checkout."
+  echo "       An external MODELS_ARTIFACTS_DIR would validate different artifacts."
+  exit 1
+fi
 
 if [ ! -f "$ARTIFACTS_DIR/latest_version.txt" ]; then
   echo "ERROR: $ARTIFACTS_DIR/latest_version.txt not found."
@@ -31,9 +43,13 @@ if [ ! -f "$ARTIFACTS_DIR/latest_version.txt" ]; then
 fi
 
 MODEL_VERSION="$(tr -d '[:space:]' < "$ARTIFACTS_DIR/latest_version.txt")"
+if [[ ! "$MODEL_VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$ ]]; then
+  echo "ERROR: Invalid model version in serving pointer."
+  exit 1
+fi
 if [ ! -d "$ARTIFACTS_DIR/$MODEL_VERSION" ]; then
   echo "ERROR: latest_version.txt names '$MODEL_VERSION' but that directory is missing."
-  echo "       Retrain, or repoint latest_version.txt at a version that exists."
+  echo "       Restore the governed artifacts; do not manually repoint serving."
   exit 1
 fi
 for f in model_2_geo_rf.joblib model_3_cat_xgb.joblib model_4_vel_rf.joblib \
@@ -42,11 +58,30 @@ for f in model_2_geo_rf.joblib model_3_cat_xgb.joblib model_4_vel_rf.joblib \
     echo "ERROR: $MODEL_VERSION is incomplete, missing $f. Retrain before deploying."
     exit 1; }
 done
-echo "Deploying model version: $MODEL_VERSION (threshold $(cat "$ARTIFACTS_DIR/$MODEL_VERSION/meta_threshold.txt"))"
+PYTHONPATH="$REPO_ROOT" MODELS_ARTIFACTS_DIR="$ARTIFACTS_DIR" python -c \
+  "from scripts.inference_engine import load_models; load_models()"
+if [ "$MODE" = "--check" ]; then
+  echo "Local artifact preflight passed. No cloud resources changed."
+  exit 0
+fi
+for tool in terraform aws git; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: '$tool' not on PATH."; exit 1; }
+done
+if [ ! -f "$REPO_ROOT/terraform/backend.hcl" ]; then
+  echo "ERROR: Configure terraform/backend.hcl from backend.hcl.example first."
+  exit 1
+fi
+SOURCE_REVISION="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)"
+if [ -n "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=normal)" ]; then
+  echo "ERROR: Commit or remove outstanding source changes before a traced cloud build."
+  exit 1
+fi
+export TF_VAR_image_tag="$MODEL_VERSION-$SOURCE_REVISION"
+echo "Provisioning reference for model version: $MODEL_VERSION"
 
 # --- Step 1: bootstrap ECR ---------------------------------------------------
 echo "--- Step 1: Initializing Terraform and bootstrapping ECR ---"
-terraform -chdir="$REPO_ROOT/terraform" init -input=false
+terraform -chdir="$REPO_ROOT/terraform" init -input=false -backend-config=backend.hcl
 terraform -chdir="$REPO_ROOT/terraform" apply -input=false -auto-approve \
   -target=aws_ecr_repository.aegis_app
 
@@ -74,14 +109,14 @@ echo "--- Step 4: Tagging and pushing to ECR ---"
 # Tag with the model version as well as latest, so a deployed task can be traced
 # back to the exact artifacts it is serving.
 docker tag aegis-app:latest "$ECR_REPO_URL:latest"
-docker tag aegis-app:latest "$ECR_REPO_URL:$MODEL_VERSION"
+docker tag aegis-app:latest "$ECR_REPO_URL:$TF_VAR_image_tag"
 docker push "$ECR_REPO_URL:latest"
-docker push "$ECR_REPO_URL:$MODEL_VERSION"
+docker push "$ECR_REPO_URL:$TF_VAR_image_tag"
 
 # --- Step 5: apply -----------------------------------------------------------
 echo "--- Step 5: Applying full Terraform stack ---"
 terraform -chdir="$REPO_ROOT/terraform" apply -input=false -auto-approve
 
 echo "======================================================================"
-echo "  DEPLOYMENT COMPLETE - image tagged latest and $MODEL_VERSION"
+echo "  REFERENCE PROVISIONED - image tagged $TF_VAR_image_tag; ECS remains at zero tasks."
 echo "======================================================================"

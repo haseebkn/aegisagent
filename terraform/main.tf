@@ -240,6 +240,16 @@ resource "aws_cloudwatch_log_group" "logs" {
   retention_in_days = 1827
 }
 
+variable "image_tag" {
+  type        = string
+  description = "Versioned image tag used by the dormant reference ECS task."
+  default     = "unpublished"
+}
+
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
 # Refuse plaintext transport even if a future caller constructs an HTTP S3 URL.
 resource "aws_s3_bucket_policy" "require_tls" {
   bucket = aws_s3_bucket.compliance_lake.id
@@ -272,7 +282,7 @@ resource "aws_ecs_task_definition" "pipeline_task" {
 
   container_definitions = jsonencode([{
     name      = "aegis_app"
-    image     = "${aws_ecr_repository.aegis_app.repository_url}:latest"
+    image     = "${aws_ecr_repository.aegis_app.repository_url}:${var.image_tag}"
     essential = true
 
     logConfiguration = {
@@ -319,7 +329,7 @@ resource "aws_vpc" "production" {
 resource "aws_subnet" "public_subnet" {
   vpc_id                  = aws_vpc.production.id
   cidr_block              = "10.0.1.0/24"
-  availability_zone       = "us-east-1a"
+  availability_zone       = data.aws_availability_zones.available.names[0]
   map_public_ip_on_launch = true
   tags = {
     Name = "${var.project_name}-public-subnet"

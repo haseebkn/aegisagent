@@ -61,6 +61,10 @@ def psi(expected, actual, bins=10, epsilon=1e-6, discrete_max_levels=20):
     produces spurious infinities -- `night` and `is_online` are identical across
     splits here, and a quantile-only implementation reported both as significant.
     """
+    expected = _finite_sample(expected, "reference")
+    actual = _finite_sample(actual, "current")
+    if not isinstance(bins, int) or bins < 2 or not 0 < epsilon < 1:
+        raise ValueError("PSI requires at least two bins and 0 < epsilon < 1")
     levels = np.unique(expected)
     if len(levels) <= discrete_max_levels:
         all_levels = np.union1d(levels, np.unique(actual))
@@ -72,7 +76,11 @@ def psi(expected, actual, bins=10, epsilon=1e-6, discrete_max_levels=20):
 
     edges = np.unique(np.quantile(expected, np.linspace(0, 1, bins + 1)))
     if len(edges) < 3:
-        return 0.0
+        # A sparse continuous feature can have >20 levels yet a constant 90th
+        # percentile. Keep its dominant value in a separate bin instead of
+        # declaring an unmeasurable distribution stable.
+        center = float(np.median(expected))
+        edges = np.array([-np.inf, center, np.nextafter(center, np.inf), np.inf])
 
     edges[0], edges[-1] = -np.inf, np.inf
     e_pct = np.histogram(expected, bins=edges)[0] / len(expected)
@@ -83,6 +91,8 @@ def psi(expected, actual, bins=10, epsilon=1e-6, discrete_max_levels=20):
 
 
 def classify(value):
+    if not np.isfinite(value) or value < 0:
+        raise ValueError("PSI must be finite and non-negative")
     if value >= PSI_SIGNIFICANT:
         return "SIGNIFICANT"
     if value >= PSI_MODERATE:
@@ -90,18 +100,25 @@ def classify(value):
     return "stable"
 
 
+def _finite_sample(values, name):
+    values = np.asarray(values, dtype=float)
+    if values.ndim != 1 or not len(values) or not np.isfinite(values).all():
+        raise ValueError(f"{name} must be a nonempty finite one-dimensional sample")
+    return values
+
+
 def compare(reference_df, current_df, features=None):
-    features = features or MONITORED
+    features = MONITORED if features is None else list(features)
+    if not features:
+        raise ValueError("At least one monitored feature is required")
+    missing = [f for f in features
+               if f not in reference_df.columns or f not in current_df.columns]
+    if missing:
+        raise ValueError(f"Missing monitored features: {', '.join(missing)}")
     results = []
     for f in features:
-        if f not in reference_df.columns or f not in current_df.columns:
-            continue
-        ref = reference_df[f].to_numpy(dtype=float)
-        cur = current_df[f].to_numpy(dtype=float)
-        ref = ref[np.isfinite(ref)]
-        cur = cur[np.isfinite(cur)]
-        if len(ref) == 0 or len(cur) == 0:
-            continue
+        ref = _finite_sample(reference_df[f].to_numpy(dtype=float), f"reference {f}")
+        cur = _finite_sample(current_df[f].to_numpy(dtype=float), f"current {f}")
 
         p = psi(ref, cur)
         ks_stat, ks_p = stats.ks_2samp(
@@ -115,7 +132,7 @@ def compare(reference_df, current_df, features=None):
             "ks_pvalue": float(ks_p),
             "ref_mean": float(ref.mean()),
             "cur_mean": float(cur.mean()),
-            "mean_ratio": float(cur.mean() / ref.mean()) if ref.mean() else float('inf'),
+            "mean_ratio": float(cur.mean() / ref.mean()) if ref.mean() else None,
         })
     results.sort(key=lambda r: -r['psi'])
     return results
@@ -128,10 +145,13 @@ def main():
                         help="evaluation_role used as the training reference.")
     parser.add_argument('--current', choices=roles, default='development_holdout',
                         help="evaluation_role treated as the scoring window.")
+    parser.add_argument('--unlock-final-evaluation', action='store_true')
     parser.add_argument('--fail-on-significant', action='store_true',
                         help="Exit non-zero if any feature shows significant drift.")
     parser.add_argument('--output', default=None, help="Write JSON report here.")
     args = parser.parse_args()
+    if 'locked_evaluation' in (args.reference, args.current) and not args.unlock_final_evaluation:
+        parser.error("locked_evaluation requires --unlock-final-evaluation")
 
     con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
@@ -179,13 +199,14 @@ def main():
         print("the model was fitted on. Investigate the feature pipeline before trusting")
         print("any score produced in this window:")
         for r in significant:
+            ratio = f"{r['mean_ratio']:.2f}x" if r['mean_ratio'] is not None else "undefined ratio"
             print(f"  - {r['feature']}: mean {r['ref_mean']:.3f} -> {r['cur_mean']:.3f} "
-                  f"({r['mean_ratio']:.2f}x), PSI {r['psi']:.3f}")
+                  f"({ratio}), PSI {r['psi']:.3f}")
 
     if args.output:
         with open(args.output, "w") as f:
             json.dump({"reference": args.reference, "current": args.current,
-                       "results": results}, f, indent=2)
+                       "results": results}, f, indent=2, allow_nan=False)
         print(f"\nReport written to {args.output}")
 
     if args.fail_on_significant:

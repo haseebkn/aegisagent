@@ -69,18 +69,24 @@ SELECT
     COALESCE(mn.merchant_card_degree, 0) AS merchant_card_degree,
     COALESCE(cn.card_merchant_degree, 0) AS card_merchant_degree,
 
-    -- Self-excluded: subtract this card's own contribution to the merchant's count.
+    -- Subtract the current card only if the training graph contains this exact
+    -- card/merchant edge. A known card visiting a new merchant contributed nothing
+    -- to that merchant's historical numerator or denominator.
     GREATEST(
-        COALESCE(mn.merchant_fraud_card_cnt, 0) - COALESCE(cn.card_is_fraud_card, 0),
+        COALESCE(mn.merchant_fraud_card_cnt, 0)
+        - CASE WHEN own_edge.cc_num IS NOT NULL THEN COALESCE(cn.card_is_fraud_card, 0) ELSE 0 END,
         0
     ) AS merchant_fraud_card_cnt,
 
     -- Share of the merchant's other cards that have known fraud.
     CASE
-        WHEN COALESCE(mn.merchant_card_degree, 0) - 1 > 0
+        WHEN COALESCE(mn.merchant_card_degree, 0)
+             - CASE WHEN own_edge.cc_num IS NOT NULL THEN 1 ELSE 0 END > 0
         THEN GREATEST(COALESCE(mn.merchant_fraud_card_cnt, 0)
-                      - COALESCE(cn.card_is_fraud_card, 0), 0)::DOUBLE
-             / (mn.merchant_card_degree - 1)
+                      - CASE WHEN own_edge.cc_num IS NOT NULL
+                             THEN COALESCE(cn.card_is_fraud_card, 0) ELSE 0 END, 0)::DOUBLE
+             / (mn.merchant_card_degree
+                - CASE WHEN own_edge.cc_num IS NOT NULL THEN 1 ELSE 0 END)
         ELSE 0.0
     END AS merchant_fraud_card_ratio,
 
@@ -90,3 +96,4 @@ FROM {{ ref('int_all_features') }} u
 LEFT JOIN merchant_nodes mn ON u.merchant = mn.merchant
 LEFT JOIN card_nodes     cn ON u.cc_num   = cn.cc_num
 LEFT JOIN two_hop        th ON u.cc_num   = th.cc_num
+LEFT JOIN edges own_edge ON u.cc_num = own_edge.cc_num AND u.merchant = own_edge.merchant

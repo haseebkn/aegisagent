@@ -68,11 +68,28 @@ def test_resolve_model_dir_allows_flat_layout_without_pointer(tmp_path):
 
 
 def test_resolve_model_dir_fails_closed_when_registry_and_pointer_disagree(tmp_path):
+    from scripts.model_registry import REQUIRED_ARTIFACTS, register_version
+
     (tmp_path / "v1").mkdir()
     (tmp_path / "v2").mkdir()
+    for name in REQUIRED_ARTIFACTS:
+        (tmp_path / "v2" / name).write_text("artifact", encoding="utf-8")
+    register_version("v2", artifacts_dir=tmp_path, registry_path=tmp_path / "registry.json", bootstrap_champion=True)
     (tmp_path / "latest_version.txt").write_text("v1")
-    (tmp_path / "registry.json").write_text('{"champion": "v2"}')
     with pytest.raises(RuntimeError, match="disagree"):
+        config.resolve_model_dir(tmp_path)
+
+
+@pytest.mark.parametrize("version", ["", ".", "..", "../escape", "nested/version", "nested\\version", "C:\\outside", "/outside"])
+def test_serving_pointer_cannot_escape_artifact_root(tmp_path, version):
+    (tmp_path / "latest_version.txt").write_text(version, encoding="utf-8")
+    with pytest.raises(ValueError, match="safe directory name"):
+        config.resolve_model_dir(tmp_path)
+
+
+def test_missing_pointer_does_not_bypass_a_governed_registry(tmp_path):
+    (tmp_path / "registry.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="no serving pointer"):
         config.resolve_model_dir(tmp_path)
 
 
