@@ -70,6 +70,13 @@ The full mart passes all 15 dbt tests over 1,852,394 rows.
 
 ## Evaluation consequence
 
+Release 0.8.0 freezes categorical maps for blend, calibration and rolling-validation
+windows using only their earlier fitting history. Previously the prequential mart
+columns could update from labels inside those evaluation windows. The figures below
+are historical Phase 1 measurements, not measurements of this revised protocol.
+The 17 current dbt tests run on the fixture in CI; the historical full-mart result
+above refers to the 15 tests that existed then.
+
 After causal reconstruction and bounded card history, the final ensemble achieves
 PR AUC 0.7766 on the development window and 0.6711 on the prospectively locked tail.
 The gap is disclosed rather than averaged away. The locked tail is not historically

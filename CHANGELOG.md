@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+- Replace the 200-row dashboard sample and hand-authored transaction with a queue
+  of actual model alerts across the full development window, scored in bounded
+  batches and ranked by score without consulting fraud labels or locked data.
+- Resolve merchant/category CSV paths at runtime so the original Windows-built
+  database also works inside Docker; invalidate cached queues when models/data change.
+- Run the API and dashboard together on loopback ports 8002 and 8502 by default,
+  with configurable port overrides and a shared image/case store.
+- Store Compose case/evidence records in an owned shared volume to support private
+  permissions under Windows Docker Desktop; keep existing host records independent.
+- Add regressions for alerts beyond row 200, ranking, locked-window exclusion,
+  thresholds, empty queues and port handling; exercise the default alert directly
+  in the dashboard smoke test.
+
+## 0.8.0 — 2026-09-07
+
+Portfolio audit and reproducible reviewer workflow.
+
+- Validate registry projections against event replay and model files before loading;
+  reject unsafe version paths and serialize local registry writes.
+- Independently rescore the development holdout before accepting a governed comparison
+  and bind its data fingerprint, artifacts, policy, metrics and report digest.
+- Validate every inference row, thresholds and output probabilities; reject missing or
+  nonfinite drift inputs and fix sparse-distribution PSI and constant-score calibration.
+- Freeze target encodings before internal holdouts and rolling validation; correct
+  calendar-day exposure, capacity analysis and historical graph self-exclusion.
+- Detect case projection/history tampering without silently repairing modern ledgers;
+  authorize narrative evidence before I/O and bind it to the case's scored model.
+- Tighten principal/request validation, escape dynamic narrative HTML, and reject
+  unversioned S3 receipts.
+- Add an isolated synthetic demo, optional cloud verification, localhost-only Compose,
+  portable Terraform backend settings and explicit reference-provisioning preflight.
+- Add behavioral regression coverage, reviewer guidance and honest historical-results
+  disclosures. Existing research artifacts and the locked evaluation tail are preserved.
+- Close SQLite connections explicitly on every path, include the dbt macros in the
+  image, and exercise the complete container demo with networking disabled.
+- Patch vulnerable application/test dependencies and add a resolved dependency audit
+  to CI; replace deprecated Streamlit layout arguments.
+
 ## 0.7.0 — 2026-08-29
 
 Phase 6 adds governed champion/challenger operations and a deliberately non-training

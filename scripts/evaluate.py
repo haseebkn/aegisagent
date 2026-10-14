@@ -23,8 +23,10 @@ from sklearn.preprocessing import StandardScaler
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import ARTIFACTS_DIR, DB_PATH, resolve_model_dir
 from scripts.evaluation_utils import (calibration_summary,
+                                      calendar_span_days,
                                       day_block_bootstrap_pr_auc,
-                                      subgroup_metrics)
+                                      subgroup_metrics,
+                                      validate_binary_probabilities)
 from scripts.inference_engine import load_models, run_inference
 
 
@@ -72,6 +74,15 @@ def score_simple_baseline(train, evaluation):
 
 
 def cost_at(y, amounts, probabilities, threshold, investigation_cost):
+    y, probabilities = validate_binary_probabilities(y, probabilities)
+    amounts = np.asarray(amounts, dtype=float)
+    if amounts.shape != y.shape or not np.isfinite(amounts).all() or (amounts < 0).any():
+        raise ValueError("Amounts must be matching finite non-negative values")
+    if not np.isfinite(investigation_cost) or investigation_cost < 0:
+        raise ValueError("Investigation cost must be finite and non-negative")
+    # nextafter(1, inf) represents a deliberately disabled/no-alert rule.
+    if not np.isfinite(threshold) or not 0 <= threshold <= np.nextafter(1.0, np.inf):
+        raise ValueError("Invalid operating threshold")
     pred = probabilities >= threshold
     tp = pred & (y == 1)
     fp = pred & (y == 0)
@@ -85,7 +96,7 @@ def cost_at(y, amounts, probabilities, threshold, investigation_cost):
         "fp": int(fp.sum()),
         "fn": int(fn.sum()),
         "precision": float(tp.sum() / pred.sum()) if pred.sum() else 0.0,
-        "recall": float(tp.sum() / (y == 1).sum()),
+        "recall": float(tp.sum() / (y == 1).sum()) if (y == 1).any() else 0.0,
         "fraud_loss": fraud_loss,
         "review_cost": review_cost,
         "total_cost": fraud_loss + review_cost,
@@ -93,7 +104,37 @@ def cost_at(y, amounts, probabilities, threshold, investigation_cost):
     }
 
 
+def exploratory_operating_points(y, amounts, probabilities, investigation_cost, max_alerts):
+    """Exact retrospective cost frontier with a hard alert cap and tied scores kept together.
+
+    These are development diagnostics, never threshold selection on a final test.
+    Fraud amount is only a hypothetical fully-preventable-loss proxy.
+    """
+    y, probabilities = validate_binary_probabilities(y, probabilities)
+    amounts = np.asarray(amounts, dtype=float)
+    # Reuse cost validation before computing the vectorized frontier.
+    cost_at(y, amounts, probabilities, 0.5, investigation_cost)
+    if max_alerts < 0:
+        raise ValueError("Alert capacity must be non-negative")
+    order = np.argsort(-probabilities, kind="stable")
+    ordered_p = probabilities[order]
+    ends = np.r_[np.flatnonzero(ordered_p[:-1] != ordered_p[1:]) + 1, len(y)]
+    thresholds = np.r_[np.nextafter(1.0, np.inf), ordered_p[ends - 1]]
+    alerts = np.r_[0, ends]
+    recovered = np.r_[0.0, np.cumsum(amounts[order] * y[order])[ends - 1]]
+    total_cost = float((amounts * y).sum()) - recovered + alerts * investigation_cost
+    cheapest = int(np.argmin(total_cost))
+    within_capacity = np.flatnonzero(alerts <= max_alerts)
+    capacity = int(within_capacity[-1])
+    return {
+        "cost_minimising": cost_at(y, amounts, probabilities, thresholds[cheapest], investigation_cost),
+        "alert_capacity": cost_at(y, amounts, probabilities, thresholds[capacity], investigation_cost),
+    }
+
+
 def benchmark_latency(frame, models, runs):
+    if frame.empty or runs < 1:
+        raise ValueError("Latency benchmark requires rows and at least one run")
     sample = frame.iloc[:min(len(frame), 5000)]
     durations = []
     for _ in range(runs):
@@ -126,14 +167,20 @@ def main():
 
     if args.window == "locked_evaluation" and not args.unlock_final_evaluation:
         parser.error("locked_evaluation requires --unlock-final-evaluation")
+    if not np.isfinite(args.investigation_cost) or args.investigation_cost < 0:
+        parser.error("--investigation-cost must be finite and non-negative")
+    if args.alert_budget < 0 or args.bootstrap_samples < 20 or args.latency_runs < 1:
+        parser.error("Require non-negative alert budget, >=20 bootstrap samples and >=1 latency run")
 
     train, frame = load_windows(args.window)
     probabilities = score_models(frame)
     probabilities["simple_logistic"] = score_simple_baseline(train, frame)
     y = frame["is_fraud"].to_numpy()
+    if np.unique(y).size != 2:
+        raise ValueError("Ranking evaluation requires fraud and non-fraud examples")
     amounts = frame["amt"].to_numpy()
     timestamps = pd.to_datetime(frame["trans_date_trans_time"])
-    span_days = max((timestamps.max() - timestamps.min()).days, 1)
+    span_days = calendar_span_days(timestamps)
     threshold = float((resolve_model_dir() / "meta_threshold.txt").read_text().strip())
 
     print("=" * 84)
@@ -160,8 +207,10 @@ def main():
             "ece": model_calibration["ece"],
             "mce": model_calibration["mce"],
         }
+        ci_text = (f"[{interval[0]:.4f}, {interval[1]:.4f}]"
+                   if interval[0] is not None else "unavailable (insufficient day/class support)")
         print(f"{name:<20} PR AUC={ranking[name]['pr_auc']:.4f} "
-              f"95% CI [{interval[0]:.4f}, {interval[1]:.4f}]  "
+              f"95% CI {ci_text}  "
               f"ROC AUC={ranking[name]['roc_auc']:.4f}  "
               f"Brier={ranking[name]['brier']:.6f}  ECE={ranking[name]['ece']:.5f}")
 
@@ -169,22 +218,19 @@ def main():
     if best_pr != "ensemble":
         gap = ranking[best_pr]["pr_auc"] - ranking["ensemble"]["pr_auc"]
         print(f"\nNOTE: {best_pr} leads the ensemble on PR AUC by {gap:.4f}. "
-              f"The ensemble is retained for calibration "
-              f"(ECE {ranking['ensemble']['ece']:.5f} vs {ranking[best_pr]['ece']:.5f}), "
-              f"not for ranking. See MODEL_CARD.md.")
+              f"Ensemble ECE={ranking['ensemble']['ece']:.5f}; "
+              f"{best_pr} ECE={ranking[best_pr]['ece']:.5f}. "
+              "Review the measured ranking/calibration tradeoff before retaining the ensemble.")
 
     ensemble = probabilities["ensemble"]
     current = cost_at(y, amounts, ensemble, threshold, args.investigation_cost)
-    candidate_thresholds = np.unique(np.quantile(ensemble, np.linspace(0.90, 0.9999, 400)))
-    candidates = [cost_at(y, amounts, ensemble, value, args.investigation_cost)
-                  for value in candidate_thresholds]
-    cost_minimising = min(candidates, key=lambda row: row["total_cost"])
-    target_alerts = args.alert_budget * span_days
-    budget = min(candidates, key=lambda row: abs(row["alerts"] - target_alerts))
+    operating_points = {"current": current}
+    if args.window == "development_holdout":
+        operating_points.update(exploratory_operating_points(
+            y, amounts, ensemble, args.investigation_cost, args.alert_budget * span_days))
 
     print("\nOPERATING POINTS")
-    for label, row in [("current", current), ("cost-minimising", cost_minimising),
-                       (f"capacity {args.alert_budget}/day", budget)]:
+    for label, row in operating_points.items():
         print(f"{label:<22} threshold={row['threshold']:.4f} "
               f"alerts/day={row['alerts']/span_days:.1f} precision={row['precision']:.1%} "
               f"recall={row['recall']:.1%} total_cost=${row['total_cost']:,.0f}")
@@ -228,10 +274,13 @@ def main():
         "prevalence": float(y.mean()),
         "span_days": span_days,
         "ranking": ranking,
-        "operating_points": {
-            "current": current,
-            "cost_minimising": cost_minimising,
-            "alert_capacity": budget,
+        "operating_points": operating_points,
+        "operating_point_protocol": {
+            "current": "frozen artifact threshold",
+            "alternatives": ("retrospective development diagnostics; not independently validated"
+                             if args.window == "development_holdout" else "disabled on locked evaluation"),
+            "cost_assumption": "hypothetical full fraud-amount prevention; excludes recovery uncertainty",
+            "capacity": "average alerts over inclusive calendar days; not a per-day maximum",
         },
         "calibration": calibration,
         "alert_region_calibration": alert_calibration,
@@ -240,7 +289,7 @@ def main():
     }
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
+            json.dump(payload, handle, indent=2, allow_nan=False)
         print(f"\nReport written to {args.output}")
 
 

@@ -6,12 +6,13 @@ import os
 import sys
 
 import duckdb
+import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import DB_PATH
 from scripts.evaluation_utils import rolling_origin_splits
-from scripts.modeling import fit_stacked_ensemble, score_ensemble
+from scripts.modeling import fit_stacked_ensemble, freeze_target_encodings, score_ensemble
 
 
 def main():
@@ -25,9 +26,11 @@ def main():
     con = duckdb.connect(str(DB_PATH), read_only=True)
     try:
         frame = con.execute("""
-            SELECT * FROM fct_fraud_features
-            WHERE dataset_split = 'train'
-            ORDER BY trans_date_trans_time, trans_num
+            SELECT f.*, t.category, t.state, t.merchant
+            FROM fct_fraud_features f
+            JOIN stg_transactions_train t USING (trans_num)
+            WHERE f.dataset_split = 'train'
+            ORDER BY f.trans_date_trans_time, f.trans_num
         """).df()
     finally:
         con.close()
@@ -35,11 +38,16 @@ def main():
     results = []
     for fold, (train_idx, validation_idx) in enumerate(
             rolling_origin_splits(len(frame), args.folds), start=1):
-        fit_window = frame.iloc[train_idx]
+        # Keep equal-timestamp peers together at every train/score boundary.
+        times = frame["trans_date_trans_time"].to_numpy()
+        boundary = int(np.searchsorted(times, times[validation_idx[0]], side="left"))
+        end = int(np.searchsorted(times, times[validation_idx[-1]], side="right"))
+        fit_window = frame.iloc[:boundary]
         cut = int(len(fit_window) * 0.80)
+        cut = int(np.searchsorted(times[:boundary], times[cut], side="left"))
         base = fit_window.iloc[:cut]
-        blend = fit_window.iloc[cut:]
-        validation = frame.iloc[validation_idx]
+        blend = freeze_target_encodings(base, fit_window.iloc[cut:])
+        validation = freeze_target_encodings(fit_window, frame.iloc[boundary:end])
         bundle = fit_stacked_ensemble(base, blend, fast=args.fast)
         probabilities, _, _, _ = score_ensemble(validation, bundle)
         y = validation["is_fraud"].to_numpy()
@@ -59,6 +67,7 @@ def main():
               f"({row['validation_start']} -> {row['validation_end']})")
 
     summary = {
+        "encoding_protocol": "frozen at each fit boundary; scoring labels excluded",
         "folds": results,
         "mean_pr_auc": sum(r["pr_auc"] for r in results) / len(results),
         "min_pr_auc": min(r["pr_auc"] for r in results),

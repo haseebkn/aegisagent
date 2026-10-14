@@ -5,8 +5,8 @@ root*, so the same code runs from a developer checkout, a container, or an ECS
 task without the `if not os.path.exists('e:/AegisAgent/...')` fallbacks that used
 to be copy-pasted across six modules.
 """
-import json
 import os
+import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +44,17 @@ FEAT_M4 = ['amt', 'log_amt', 'distance_km', 'night', 'hour_sin', 'hour_cos', 'da
 # this dataset. See docs/graph-features.md for the measured before/after.
 
 
+def version_directory(artifacts_dir, version: str) -> Path:
+    """Resolve one model version without permitting traversal or symlink escapes."""
+    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", version):
+        raise ValueError("Model version must be a single safe directory name")
+    root = Path(artifacts_dir).resolve()
+    directory = root / version
+    if directory.resolve().parent != root or directory.is_symlink():
+        raise ValueError("Model version must remain inside its artifact directory")
+    return directory
+
+
 def resolve_model_dir(artifacts_dir=None) -> Path:
     """Return the versioned artifact directory named by latest_version.txt.
 
@@ -55,30 +66,31 @@ def resolve_model_dir(artifacts_dir=None) -> Path:
 
     No pointer at all is still a valid flat layout, and returns the base directory.
     """
-    base = Path(artifacts_dir) if artifacts_dir else ARTIFACTS_DIR
+    base = (Path(artifacts_dir) if artifacts_dir else ARTIFACTS_DIR).resolve()
     pointer = base / "latest_version.txt"
+    registry_path = (
+        MODEL_REGISTRY_PATH if base == ARTIFACTS_DIR.resolve() else base / "registry.json"
+    )
     if pointer.exists():
-        version = pointer.read_text().strip()
-        registry_path = (
-            MODEL_REGISTRY_PATH if base == ARTIFACTS_DIR else base / "registry.json"
-        )
+        version = pointer.read_text(encoding="utf-8").strip()
+        candidate = version_directory(base, version)
         if registry_path.exists():
-            try:
-                registered_champion = json.loads(
-                    registry_path.read_text(encoding="utf-8")
-                ).get("champion")
-            except (OSError, json.JSONDecodeError) as exc:
-                raise RuntimeError("Model registry is unreadable; refusing to serve") from exc
+            from scripts.model_registry import load_registry, verify_registered_artifacts
+
+            registry = load_registry(registry_path)
+            registered_champion = registry["champion"]
             if registered_champion != version:
                 raise RuntimeError(
                     "Serving pointer and governed champion disagree; refusing to serve"
                 )
-        candidate = base / version
-        if not candidate.exists():
+            verify_registered_artifacts(registry, base, version)
+        if not candidate.is_dir():
             raise FileNotFoundError(
                 f"latest_version.txt names '{version}' but {candidate} does not exist. "
                 f"Refusing to fall back to {base}, which may hold stale artifacts. "
                 f"Retrain, or point latest_version.txt at a version that is present."
             )
         return candidate
+    if registry_path.exists():
+        raise RuntimeError("Governed model registry has no serving pointer; refusing to serve")
     return base

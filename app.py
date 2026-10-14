@@ -2,16 +2,19 @@ import sys
 import os
 import streamlit as st
 import pandas as pd
-import duckdb
+from duckdb import Error as DuckDBError
 import json
 import re
+from html import escape
+from pathlib import Path
 
 # Add project root to sys.path
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from scripts.config import ARTIFACTS_DIR, DB_PATH
+from scripts.config import ARTIFACTS_DIR, DB_PATH, resolve_model_dir
+from scripts.dashboard_transactions import data_fingerprint, load_alert_queue
 from scripts.case_management import (
     CaseManagementError,
     CaseStatus,
@@ -20,6 +23,7 @@ from scripts.case_management import (
     event_to_dict,
 )
 from scripts.inference_engine import load_models, run_inference
+from scripts.narrative_rendering import markdown_to_html
 from scripts.pii import mask_pan
 from scripts.privacy import safe_error_message
 from scripts.sar_agent import generate_sar_narrative, save_sar_report
@@ -213,104 +217,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Helper: Load model version telemetry
-def load_telemetry():
-    artifacts_dir = str(ARTIFACTS_DIR)
-    latest_file = os.path.join(artifacts_dir, "latest_version.txt")
-    if os.path.exists(latest_file):
-        with open(latest_file, "r") as f:
-            version_str = f.read().strip()
-        metrics_file = os.path.join(artifacts_dir, version_str, "training_metrics.json")
-        if os.path.exists(metrics_file):
-            with open(metrics_file, "r") as f:
-                return json.load(f), version_str
-    return None, "Unknown"
+def load_telemetry(model_dir):
+    metrics_file = Path(model_dir) / "training_metrics.json"
+    if metrics_file.is_file():
+        return json.loads(metrics_file.read_text(encoding="utf-8")), Path(model_dir).name
+    return None, Path(model_dir).name
 
 # Cache resource for models
 @st.cache_resource
-def load_production_models():
-    return load_models(ARTIFACTS_DIR)
+def load_production_models(model_dir, model_fingerprint):
+    return load_models(model_dir)
 
-# Load database transactions
-@st.cache_data
-def get_db_transactions():
-    db_path = str(DB_PATH)
-    if not os.path.exists(db_path):
-        return []
-    
-    con = duckdb.connect(db_path)
-    # Join features with raw data fields from stg_transactions_test to get names/merchant names/etc.
-    query = """
-        SELECT 
-            f.*, 
-            t.first, 
-            t.last, 
-            t.gender, 
-            t.street, 
-            t.city, 
-            t.state, 
-            t.zip, 
-            t.lat, 
-            t.long, 
-            t.merchant, 
-            t.category, 
-            t.merch_lat, 
-            t.merch_long, 
-            t.job, 
-            t.dob
-        FROM fct_fraud_features f
-        LEFT JOIN stg_transactions_test t ON f.trans_num = t.trans_num
-        WHERE f.evaluation_role = 'development_holdout'
-        LIMIT 200
-    """
-    df = con.execute(query).df()
-    con.close()
-    return df.to_dict(orient='records')
+@st.cache_data(ttl=300, max_entries=4)
+def get_db_transactions(db_path, model_dir, fingerprint, model_fingerprint, _models):
+    # Version and input fingerprints bind cached scores to the displayed model/data.
+    return load_alert_queue(db_path, _models)
 
-# A synthetic high-risk transaction used to exercise the STR path on demand.
-# Only the *input* is synthetic -- it carries a complete feature vector and is
-# scored by the real ensemble like every other row in the dropdown. Nothing in
-# this dashboard displays a model score that did not come out of a model.
-FRAUD_DEMO_TXN = {
-    'trans_num': 'TXN_88888',
-    'trans_date_trans_time': pd.Timestamp('2026-06-10 02:45:00'),
-    'cc_num': 9876543210987654,
-    'first': 'Alice',
-    'last': 'Smith',
-    'gender': 'F',
-    'job': 'Data Engineer',
-    'street': '123 Main Street',
-    'city': 'Boston',
-    'state': 'MA',
-    'zip': '02108',
-    'lat': 42.3601,
-    'long': -71.0589,
-    'merchant': 'fraud_Luxury_Jewelry_Store',
-    'category': 'shopping_pos',
-    'merch_lat': 51.5074,
-    'merch_long': -0.1278,
-    'amt': 7500.00,
-    'distance_km': 5262.11,
-    'night': 1,
-    'card_mean_amt': 50.00,
-    'amt_z_card': 149.00,
-    'txns_24h': 15,
-    'txns_7d': 25,
-    'category_risk': 0.015,
-    'log_amt': 8.9227,
-    'hour': 2,
-    'day_of_week': 2,
-    'hour_sin': -0.2588,
-    'hour_cos': 0.9659,
-    'is_online': 1,
-    'state_risk': 0.0034,
-    'merchant_risk': 0.0153,
-    'card_txn_cnt': 480,
-    'card_std_amt': 154.27,
-    'amt_x_catRisk': 112.5,
-    'dist_x_online': 5262.11,
-    'amt_x_night': 7500.00,
-    'is_fraud': 1
-}
 
 # Main Application Title
 st.markdown('<h1 class="app-title">🛡️ AegisAgent: Fraud Investigation Support Demo</h1>', unsafe_allow_html=True)
@@ -355,34 +277,43 @@ st.sidebar.caption(
     f"`{security_principal.organization_id}` · development only"
 )
 
-# Load data and prepare dropdown options
-txns = get_db_transactions()
-# Add demo transaction at index 0
-all_options = [FRAUD_DEMO_TXN] + txns
+try:
+    # Resolve and verify on each rerun, then use the same immutable version for
+    # telemetry, model-cache lookup, inference, and case provenance.
+    active_model_dir = resolve_model_dir(ARTIFACTS_DIR)
+    telemetry, model_version = load_telemetry(active_model_dir)
+    model_fingerprint = tuple(
+        (path.name, path.stat().st_size, path.stat().st_mtime_ns)
+        for path in sorted(active_model_dir.iterdir()) if path.is_file()
+    )
+    models = load_production_models(str(active_model_dir), model_fingerprint)
+    with st.spinner("Finding model alerts in the development data..."):
+        queue = get_db_transactions(
+            str(DB_PATH), str(active_model_dir), data_fingerprint(DB_PATH),
+            model_fingerprint, models,
+        )
+except (OSError, ValueError, RuntimeError, DuckDBError):
+    st.error("The model or transaction data could not be loaded. Check the model bundle, feature database and fraudTest.csv.")
+    st.stop()
 
-options_labels = []
-for t in all_options:
-    lbl = f"{t['trans_num']} - ${t['amt']:.2f} ({t['category']})"
-    if t['trans_num'] == 'TXN_88888':
-        lbl += " ⚠️ FRAUD DEMO"
-    elif t['is_fraud'] == 1:
-        lbl += " [FRAUD]"
-    options_labels.append(lbl)
-
+if not queue.transactions:
+    st.info("No transactions in the development data exceed this model's alert threshold.")
+    st.stop()
+all_options = queue.transactions
+options_labels = [
+    f"{t['trans_num']} - ${t['amt']:.2f} ({t['category'] or 'Unknown'}) · score {t['alert_score']:.4f}"
+    for t in all_options
+]
+st.sidebar.caption(f"Showing {len(all_options):,} of {queue.alert_count:,} model alerts, highest score first.")
 selected_idx = st.sidebar.selectbox(
-    "Choose Transaction",
-    range(len(all_options)),
-    format_func=lambda i: options_labels[i]
+    "Choose Transaction", range(len(all_options)), format_func=lambda i: options_labels[i],
 )
-
 selected_txn = all_options[selected_idx]
 st.sidebar.caption(f"Card: {mask_pan(selected_txn.get('cc_num'))}")
 
 # Sidebar: System Metadata
 st.sidebar.markdown("<div class='custom-hr'></div>", unsafe_allow_html=True)
 st.sidebar.subheader("⚙️ System Metadata")
-
-telemetry, model_version = load_telemetry()
 st.sidebar.write("**Model Directory:** `models_artifacts/`")
 st.sidebar.write(f"**Active Version:** `{model_version}`")
 
@@ -430,7 +361,7 @@ with col2:
     st.markdown(f"""
     <div class="metric-card">
         <div class="metric-label">🏷️ Merchant Category</div>
-        <div class="metric-value">{clean_cat}</div>
+        <div class="metric-value">{escape(clean_cat)}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -456,10 +387,9 @@ st.markdown("<div class='custom-hr'></div>", unsafe_allow_html=True)
 st.subheader("🧠 Stacking Ensemble Telemetry")
 
 # Load models and threshold
-model_2, model_3, model_4, scaler_4, meta_model, threshold = load_production_models()
+model_2, model_3, model_4, scaler_4, meta_model, threshold = models
 
-# Every transaction, including the synthetic demo row, is scored by the live
-# ensemble. There is deliberately no override branch here.
+# Re-score the selected alert with the same version used to build the queue.
 df_row = pd.DataFrame([selected_txn])
 try:
     meta_p, p_m2, p_m3, p_m4, triggered_alert = run_inference(
@@ -470,8 +400,8 @@ try:
     p_m3_val = float(p_m3[0])
     p_m4_val = float(p_m4[0])
     triggered = bool(triggered_alert[0])
-except Exception as e:
-    st.error(f"Inference Engine Error: {e}")
+except Exception:
+    st.error("The transaction could not be scored. Check its features and model bundle.")
     st.stop()
 
 # Layout: Base model progress bars (left) + Risk Gauge (right)
@@ -496,12 +426,12 @@ with col_left:
     st.markdown(f"<p style='text-align: right; margin-top:-15px; color:#8b949e; font-size:0.9rem;'>Score: <b>{p_m4_val:.4f}</b></p>", unsafe_allow_html=True)
 
 with col_right:
-    st.write("##### Staked Classifier Assessment")
+    st.write("##### Stacked Classifier Assessment")
     
     # Risk gauge visualization
     risk_color = "#ff7b72" if triggered else "#58a6ff"
     gradient = "linear-gradient(to right, #58a6ff, #f0883e, #ff7b72)" if triggered else "linear-gradient(to right, #58a6ff, #388bfd)"
-    status_text = "⚠️ HIGH RISK - BREACH DETECTED" if triggered else "🟢 SECURE - INSIDE PARAMETERS"
+    status_text = "⚠️ MODEL ALERT - REVIEW REQUIRED" if triggered else "BELOW ALERT THRESHOLD"
     gauge_class = "gauge-breached" if triggered else "gauge-safe"
     
     st.markdown(f"""
@@ -516,9 +446,9 @@ with col_right:
             <div style="position: absolute; left: {threshold * 100}%; top: 0; bottom: 0; width: 2.5px; background-color: #f0f6fc; box-shadow: 0 0 6px #ffffff;" title="Threshold: {threshold:.4f}"></div>
         </div>
         <div style="display: flex; justify-content: space-between; font-size: 0.8rem; color: #8b949e; margin-top: 6px;">
-            <span>0% (Safe)</span>
+            <span>Lower score</span>
             <span style="color: {risk_color}; font-weight: 600;">Threshold Limit: {threshold:.4f} ({threshold * 100:.1f}%)</span>
-            <span>100% (Threat)</span>
+            <span>Higher score</span>
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -527,67 +457,6 @@ with col_right:
 st.markdown("<div class='custom-hr'></div>", unsafe_allow_html=True)
 st.subheader("📋 Investigation narrative drafting assistant")
 
-def markdown_to_html(text):
-    # Convert bold **text** to <strong>text</strong>
-    text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
-    # Convert italic *text* to <em>text</em>
-    text = re.sub(r'\*(.*?)\*', r'<em>\1</em>', text)
-    
-    lines = text.split("\n")
-    html_lines = []
-    in_ordered_list = False
-    in_unordered_list = False
-    
-    for line in lines:
-        line_stripped = line.strip()
-        if not line_stripped:
-            continue
-            
-        # Check if numbered list item (e.g. 1. Velocity Anomaly)
-        ol_match = re.match(r'^(\d+)\.\s+(.*)$', line_stripped)
-        # Check if bullet list item (e.g. - or * Velocity Anomaly)
-        ul_match = re.match(r'^[\*\-\+]\s+(.*)$', line_stripped)
-        
-        if ol_match:
-            if in_unordered_list:
-                html_lines.append('</ul>')
-                in_unordered_list = False
-            if not in_ordered_list:
-                html_lines.append('<ol style="margin-top: 8px; margin-bottom: 8px; padding-left: 20px;">')
-                in_ordered_list = True
-            html_lines.append(f'<li style="margin-bottom: 8px; line-height: 1.6;">{ol_match.group(2)}</li>')
-        elif ul_match:
-            if in_ordered_list:
-                html_lines.append('</ol>')
-                in_ordered_list = False
-            if not in_unordered_list:
-                html_lines.append('<ul style="margin-top: 8px; margin-bottom: 8px; padding-left: 20px; list-style-type: disc;">')
-                in_unordered_list = True
-            html_lines.append(f'<li style="margin-bottom: 8px; line-height: 1.6;">{ul_match.group(2)}</li>')
-        else:
-            if in_ordered_list:
-                html_lines.append('</ol>')
-                in_ordered_list = False
-            if in_unordered_list:
-                html_lines.append('</ul>')
-                in_unordered_list = False
-                
-            # Check for headers
-            if line_stripped.startswith("###"):
-                html_lines.append(f'<h5 style="margin-top: 16px; margin-bottom: 8px; color: #58a6ff; font-weight: 600;">{line_stripped[3:].strip()}</h5>')
-            elif line_stripped.startswith("##"):
-                html_lines.append(f'<h4 style="margin-top: 20px; margin-bottom: 10px; color: #58a6ff; font-weight: 600;">{line_stripped[2:].strip()}</h4>')
-            elif line_stripped.startswith("#"):
-                html_lines.append(f'<h3 style="margin-top: 24px; margin-bottom: 12px; color: #58a6ff; font-weight: 600;">{line_stripped[1:].strip()}</h3>')
-            else:
-                html_lines.append(f'<p style="margin-bottom: 12px; line-height: 1.6;">{line_stripped}</p>')
-                
-    if in_ordered_list:
-        html_lines.append('</ol>')
-    if in_unordered_list:
-        html_lines.append('</ul>')
-        
-    return "\n".join(html_lines)
 
 # Helper function to parse LLM response into structured card elements
 def render_parsed_compliance_report(narrative):
@@ -628,7 +497,7 @@ def render_parsed_compliance_report(narrative):
             <div class="report-card-header">
                 <span class="report-card-badge" style="background-color: rgba(255, 123, 114, 0.1); color: #ff7b72; border: 1px solid rgba(255, 123, 114, 0.2);">📋 Suspicious Activity Narrative Report</span>
             </div>
-            <div class="report-card-body" style="font-family: monospace; white-space: pre-wrap;">{narrative}</div>
+            <div class="report-card-body" style="font-family: monospace; white-space: pre-wrap;">{escape(narrative)}</div>
         </div>
         """, unsafe_allow_html=True)
         return
@@ -636,7 +505,7 @@ def render_parsed_compliance_report(narrative):
     # Render intro paragraph if any exists
     intro = parts[0].strip()
     if intro:
-        st.markdown(f"<div style='margin-bottom: 20px; color: #8b949e; font-style: italic; line-height: 1.5;'>{intro}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='margin-bottom: 20px; color: #8b949e; font-style: italic; line-height: 1.5;'>{escape(intro)}</div>", unsafe_allow_html=True)
         
     # Render sections inside cards
     for i in range(1, len(parts), 2):
@@ -684,7 +553,7 @@ if triggered:
         )
         if st.button(
             "Create Investigation Case",
-            use_container_width=True,
+            width="stretch",
         ):
             try:
                 case_store.create_alert_case(
@@ -715,7 +584,7 @@ if triggered:
         history_rows = [event_to_dict(event) for event in case_store.history(case_record.case_id)]
         for row in history_rows:
             row["metadata"] = json.dumps(row["metadata"], sort_keys=True)
-        st.dataframe(history_rows, use_container_width=True, hide_index=True)
+        st.dataframe(history_rows, width="stretch", hide_index=True)
 
     evidence_rows = case_store.list_evidence(case_record.case_id)
     with st.expander(f"Evidence inventory ({len(evidence_rows)})"):
@@ -734,7 +603,7 @@ if triggered:
                     }
                     for item in evidence_rows
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
         else:
@@ -757,7 +626,7 @@ if triggered:
         )
         if st.button(
             "Assign to Me & Start Review",
-            use_container_width=True,
+            width="stretch",
         ):
             try:
                 case_store.start_review(
@@ -793,7 +662,7 @@ if triggered:
                 "Only an identity granted the authorized_rgs_reviewer permission can save "
                 "a disposition. The displayed identity comes from the local-only provider."
             )
-            if st.button("Save RGS Disposition", use_container_width=True):
+            if st.button("Save RGS Disposition", width="stretch"):
                 try:
                     case_store.record_rgs_decision(
                         case_record.case_id,
@@ -816,6 +685,13 @@ if triggered:
             st.success("Human review concluded with RGS not reached. No filing action was created.")
         st.stop()
     
+    if case_record.model_version != model_version or abs(case_record.model_score - meta_score) > 1e-12:
+        st.warning(
+            "This case records a different model result. Restore its recorded model version "
+            "before generating narrative evidence for this case."
+        )
+        st.stop()
+
     # Store the narrative state in st.session_state to persist across button clicks/renders
     if "narrative" not in st.session_state:
         st.session_state.narrative = None
@@ -823,14 +699,15 @@ if triggered:
         st.session_state.narrative_txn = None
         
     # If the transaction changes, clear the cached narrative
-    if st.session_state.narrative_txn != selected_txn['trans_num']:
+    narrative_context = (selected_txn['trans_num'], model_version)
+    if st.session_state.narrative_txn != narrative_context:
         st.session_state.narrative = None
-        st.session_state.narrative_txn = selected_txn['trans_num']
+        st.session_state.narrative_txn = narrative_context
         
     btn_col, status_col = st.columns([1, 3])
     
     with btn_col:
-        generate_btn = st.button("Generate Narrative Draft 🚀", use_container_width=True)
+        generate_btn = st.button("Generate Narrative Draft 🚀", width="stretch")
         
     with status_col:
         s3_bucket = os.environ.get("COMPLIANCE_S3_BUCKET")
@@ -872,6 +749,7 @@ if triggered:
                         meta_score,
                         st.session_state.narrative,
                         case_id=case_record.case_id,
+                        model_version=model_version,
                         principal=security_principal,
                         expected_case_version=case_record.version,
                         case_store=case_store,

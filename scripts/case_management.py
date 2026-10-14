@@ -15,6 +15,7 @@ import os
 import sqlite3
 import uuid
 from dataclasses import asdict, dataclass
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -193,11 +194,17 @@ class CaseStore:
         self._initialize()
         os.chmod(self.path, 0o600)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self):
         con = sqlite3.connect(self.path, timeout=10)
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA foreign_keys = ON")
-        return con
+        try:
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA foreign_keys = ON")
+            with con:
+                yield con
+        finally:
+            # sqlite's own context manager commits/rolls back but does not close.
+            con.close()
 
     def _initialize(self) -> None:
         with self._connect() as con:
@@ -268,10 +275,9 @@ class CaseStore:
                     "ALTER TABLE case_events ADD COLUMN event_hash TEXT NOT NULL DEFAULT ''"
                 )
                 needs_hash_backfill = True
-            incomplete_hashes = con.execute(
-                "SELECT 1 FROM case_events WHERE event_hash = '' LIMIT 1"
-            ).fetchone()
-            if needs_hash_backfill or incomplete_hashes:
+            # Hash only genuine schema migrations. Reopening a modern store must
+            # never silently re-sign altered events when a digest was erased.
+            if needs_hash_backfill:
                 self._backfill_event_hashes(con)
             case_columns = {row[1] for row in con.execute("PRAGMA table_info(cases)")}
             if "organization_id" not in case_columns:
@@ -464,6 +470,7 @@ class CaseStore:
         event_id = str(uuid.uuid4())
         event_metadata = dict(metadata or {})
         event_metadata.update({
+            "trans_num": trans_num,
             "model_score": model_score,
             "threshold": threshold,
             "model_version": model_version,
@@ -562,11 +569,12 @@ class CaseStore:
         status: CaseStatus | str | None = None,
         *,
         principal: SecurityPrincipal | None = None,
+        limit: int | None = None,
     ) -> list[CaseRecord]:
         identity, _ = self._identity(Permission.READ_CASE, principal=principal)
         query = "SELECT * FROM cases"
         clauses: list[str] = []
-        params: list[str] = []
+        params: list[Any] = []
         if identity.provider == "local-development":
             clauses.append("organization_id IN (?, ?)")
             params.extend([identity.organization_id, LEGACY_UNSCOPED_ORGANIZATION])
@@ -580,6 +588,11 @@ class CaseStore:
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY updated_at DESC, case_id"
+        if limit is not None:
+            if type(limit) is not int or not 1 <= limit <= 200:
+                raise ValidationError("limit must be an integer between 1 and 200")
+            query += " LIMIT ?"
+            params.append(limit)
         with self._connect() as con:
             rows = con.execute(query, tuple(params)).fetchall()
         return [self._case(row) for row in rows]
@@ -605,6 +618,37 @@ class CaseStore:
             ).fetchall()
         return [self._evidence(row) for row in rows]
 
+    def authorize_evidence_attachment(
+        self,
+        case_id: str,
+        *,
+        expected_version: int,
+        actor: str | None = None,
+        actor_role: ReviewerRole | str | None = None,
+        principal: SecurityPrincipal | None = None,
+    ) -> tuple[CaseRecord, SecurityPrincipal]:
+        """Check access and state before preserving or externally archiving content.
+
+        Attachment repeats state checks under the write lock because an authorized
+        preflight does not reserve a case version.
+        """
+        identity, _ = self._identity(
+            Permission.ATTACH_EVIDENCE,
+            principal=principal,
+            actor=actor,
+            actor_role=actor_role,
+        )
+        current = self.get_case(case_id, principal=identity)
+        if type(expected_version) is not int or expected_version < 1:
+            raise ValidationError("expected_version must be a positive integer")
+        if current.version != expected_version:
+            raise ConcurrencyError("Case changed; reload before attaching evidence")
+        if current.status != CaseStatus.UNDER_REVIEW.value:
+            raise InvalidTransition(
+                f"Evidence may only be attached during active review, not {current.status}"
+            )
+        return current, identity
+
     def attach_evidence(
         self,
         case_id: str,
@@ -619,6 +663,13 @@ class CaseStore:
             raise ValidationError(
                 f"Evidence belongs to {receipt.case_id}, not requested case {case_id}"
             )
+        _, identity = self.authorize_evidence_attachment(
+            case_id,
+            principal=principal,
+            actor=actor,
+            actor_role=actor_role,
+            expected_version=expected_version,
+        )
         timestamp = _now()
         with self._connect() as con:
             con.execute("BEGIN IMMEDIATE")
@@ -628,7 +679,7 @@ class CaseStore:
             current = self._case(row)
             identity, role_value = self._identity(
                 Permission.ATTACH_EVIDENCE,
-                principal=principal,
+                principal=identity,
                 actor=actor,
                 actor_role=actor_role,
                 resource_organization_id=current.organization_id,
@@ -650,6 +701,8 @@ class CaseStore:
                 raise InvalidTransition(
                     f"Evidence may only be attached during active review, not {current.status}"
                 )
+            if verify_file(receipt.local_path, receipt.sha256, receipt.byte_size):
+                raise ValidationError("Evidence file does not match its preservation receipt")
             next_version = current.version + 1
             previous_hash = con.execute(
                 "SELECT event_hash FROM case_events WHERE case_id = ? ORDER BY sequence DESC LIMIT 1",
@@ -735,7 +788,11 @@ class CaseStore:
         evidence = self.list_evidence(case_id, principal=identity)
         issues: list[str] = []
         previous = ""
-        for event in history:
+        if not history:
+            issues.append("Case has no event history")
+        for sequence, event in enumerate(history, start=1):
+            if event.sequence != sequence:
+                issues.append(f"Event sequence is not contiguous at {sequence}")
             metadata_json = json.dumps(event.metadata, sort_keys=True)
             expected = _event_digest(
                 event_id=event.event_id,
@@ -760,6 +817,29 @@ class CaseStore:
             issues.append(
                 f"Case version {case.version} does not match last event {history[-1].sequence}"
             )
+        if history:
+            first, last = history[0], history[-1]
+            if first.event_type != "alert_created" or first.from_status is not None:
+                issues.append("Case history does not begin with an alert creation")
+            for field, value in {
+                "status": last.to_status,
+                "created_at": first.occurred_at,
+                "updated_at": last.occurred_at,
+                "assigned_to": next(
+                    (event.actor for event in reversed(history) if event.event_type == "review_started"),
+                    None,
+                ),
+            }.items():
+                if getattr(case, field) != value:
+                    issues.append(f"Case {field} differs from its event history")
+            for field in ("trans_num", "model_score", "threshold", "model_version"):
+                # Pre-existing event formats did not commit every projection
+                # field. Do not manufacture historical commitments on migration.
+                if field in first.metadata and getattr(case, field) != first.metadata[field]:
+                    issues.append(f"Case {field} differs from its initial event")
+            for before, after in zip(history, history[1:]):
+                if after.from_status != before.to_status:
+                    issues.append(f"Event {after.sequence} has an inconsistent status transition")
         if history and case.organization_id != LEGACY_UNSCOPED_ORGANIZATION:
             committed_organization = (
                 history[0].metadata.get("identity", {}).get("organization_id")
@@ -791,12 +871,22 @@ class CaseStore:
                     "media_type": item.media_type,
                     "local_path": item.local_path,
                     "archive_receipt": item.archive_receipt,
+                    "created_at": item.created_at,
                 }
                 for field, value in committed.items():
                     if event_metadata.get(field) != value:
                         issues.append(
                             f"Evidence {item.evidence_id} field {field} differs from its case event"
                         )
+                event = next(
+                    event for event in history
+                    if event.event_type == "evidence_attached"
+                    and event.metadata.get("evidence_id") == item.evidence_id
+                )
+                if item.created_by != event.actor:
+                    issues.append(
+                        f"Evidence {item.evidence_id} field created_by differs from its case event"
+                    )
             if item.archive_receipt and not item.archive_receipt.get("verified"):
                 issues.append(f"Evidence {item.evidence_id} has an unverified archive receipt")
         return {
@@ -853,6 +943,8 @@ class CaseStore:
         rationale: str,
         expected_version: int,
     ) -> CaseRecord:
+        if type(reached) is not bool:
+            raise ValidationError("reached must be a boolean human decision")
         current = self.get_case(case_id, principal=principal)
         identity, role_value = self._identity(
             Permission.RECORD_RGS_DECISION,
@@ -889,6 +981,8 @@ class CaseStore:
         expected_version: int,
         assigned_to: str | None = None,
     ) -> CaseRecord:
+        if type(expected_version) is not int or expected_version < 1:
+            raise ValidationError("expected_version must be a positive integer")
         actor = _required_text(actor, "actor", 2)
         rationale = _required_text(rationale, "rationale", 20)
         timestamp = _now()
@@ -898,6 +992,14 @@ class CaseStore:
             if row is None:
                 raise CaseNotFound(f"Unknown case: {case_id}")
             current = self._case(row)
+            # Reauthorize the locked projection, rather than relying solely on
+            # the read performed before entering the transaction.
+            require_permission(
+                identity,
+                Permission.RECORD_RGS_DECISION
+                if to_status in TERMINAL_STATUSES else Permission.START_REVIEW,
+                resource_organization_id=current.organization_id,
+            )
             if current.version != expected_version:
                 raise ConcurrencyError(
                     f"Case {case_id} changed from version {expected_version} to "

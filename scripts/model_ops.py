@@ -5,13 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 
-import duckdb
-
-from scripts.config import ARTIFACTS_DIR, DB_PATH, MODEL_REGISTRY_PATH
-from scripts.inference_engine import load_models, run_inference
-from scripts.model_comparison import build_comparison, write_report
+from scripts.config import ARTIFACTS_DIR, MODEL_REGISTRY_PATH, version_directory
+from scripts.model_comparison import write_report
 from scripts.model_registry import (
-    RegistryError,
+    evaluate_registered_comparison,
     load_registry,
     promote_candidate,
     record_comparison,
@@ -30,46 +27,13 @@ def _principal(permission: Permission):
     return identity
 
 
-def _score(version, frame):
-    model_dir = ARTIFACTS_DIR / version
-    models = load_models(model_dir)
-    probabilities = run_inference(frame, *models)[0]
-    return probabilities, models[-1]
-
-
 def compare(args):
     identity = _principal(Permission.COMPARE_MODELS)
-    registry = load_registry(MODEL_REGISTRY_PATH)
-    champion = registry["champion"]
-    if not champion:
-        raise RegistryError("Registry has no champion")
-    candidate = registry["versions"].get(args.candidate)
-    if not candidate or candidate["status"] != "candidate":
-        raise RegistryError(f"{args.candidate} is not a registered candidate")
-    with duckdb.connect(str(DB_PATH), read_only=True) as con:
-        frame = con.execute(
-            """SELECT * FROM fct_fraud_features
-               WHERE evaluation_role = 'development_holdout'
-               ORDER BY trans_date_trans_time, trans_num"""
-        ).df()
-    if frame.empty or frame["is_fraud"].nunique() < 2:
-        raise RegistryError("Development holdout must contain both outcome classes")
-    champion_probs, champion_threshold = _score(champion, frame)
-    candidate_probs, candidate_threshold = _score(args.candidate, frame)
-    report = build_comparison(
-        champion_version=champion,
-        candidate_version=args.candidate,
-        champion_manifest_sha256=registry["versions"][champion]["manifest_sha256"],
-        candidate_manifest_sha256=candidate["manifest_sha256"],
-        y=frame["is_fraud"].to_numpy(),
-        timestamps=frame["trans_date_trans_time"],
-        champion_probabilities=champion_probs,
-        candidate_probabilities=candidate_probs,
-        champion_threshold=champion_threshold,
-        candidate_threshold=candidate_threshold,
+    report = evaluate_registered_comparison(
+        args.candidate,
         bootstrap_samples=args.bootstrap_samples,
     )
-    destination = ARTIFACTS_DIR / args.candidate / "promotion_report.json"
+    destination = version_directory(ARTIFACTS_DIR, args.candidate) / "promotion_report.json"
     write_report(destination, report)
     record_comparison(destination, principal=identity)
     print(json.dumps(report, indent=2))
@@ -78,7 +42,7 @@ def compare(args):
 
 def promote(args):
     identity = _principal(Permission.PROMOTE_MODEL)
-    report = ARTIFACTS_DIR / args.candidate / "promotion_report.json"
+    report = version_directory(ARTIFACTS_DIR, args.candidate) / "promotion_report.json"
     registry = promote_candidate(
         args.candidate,
         principal=identity,

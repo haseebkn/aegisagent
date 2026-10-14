@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import sys
 from datetime import datetime
@@ -13,7 +14,7 @@ from scripts.evidence import EvidenceStore
 from scripts.grounding import check_narrative, correction_prompt
 from scripts.inference_engine import NoAlertsInSample
 from scripts.pii import mask_pan
-from scripts.privacy import minimize_for_narrative, safe_error_message
+from scripts.privacy import minimize_for_narrative, redact_sensitive_text, safe_error_message
 from scripts.security import SecurityPrincipal
 from scripts.security import AuthenticationRequired, local_development_principal
 
@@ -124,7 +125,7 @@ Generate the 5W+H investigation narrative draft now. Use only the figures above.
                 body=body
             )
             response_body = json.loads(response.get('body').read())
-            narrative = response_body['content'][0]['text']
+            narrative = redact_sensitive_text(response_body['content'][0]['text'])
             
             # Factual grounding review, not a vocabulary filter. See scripts/grounding.py
             # and docs/str-narrative-design.md.
@@ -176,6 +177,7 @@ def save_sar_report(
     output_dir=None,
     *,
     case_id,
+    model_version,
     actor=None,
     actor_role=None,
     principal: SecurityPrincipal | None = None,
@@ -187,12 +189,23 @@ def save_sar_report(
 ):
     """Preserve and link a grounded draft (or quarantine evidence) to an active case."""
     case_store = case_store or CaseStore()
-    case = case_store.get_case(case_id)
+    case, identity = case_store.authorize_evidence_attachment(
+        case_id,
+        principal=principal,
+        actor=actor,
+        actor_role=actor_role,
+        expected_version=expected_case_version,
+    )
     if case.trans_num != str(txn.get("trans_num", "")):
         raise ValueError(
             f"Case {case_id} belongs to transaction {case.trans_num}, not "
             f"{txn.get('trans_num', 'unknown')}"
         )
+    if model_version != case.model_version or not math.isclose(
+        meta_score, case.model_score, rel_tol=0, abs_tol=1e-12
+    ):
+        raise ValueError("Narrative model version and score must match the case alert")
+    narrative = redact_sensitive_text(narrative)
     if evidence_store is None:
         evidence_root = EVIDENCE_DIR if output_dir is None else os.path.join(output_dir, "evidence")
         evidence_store = EvidenceStore(evidence_root)
@@ -219,6 +232,8 @@ Status: DRAFT / NOT APPROVED / NOT SUBMITTED
 ======================================================================
 METADATA:
 Transaction Number:     {trans_num}
+Case Model Version:     {case.model_version}
+Case Alert Threshold:   {case.threshold:.4f}
 Credit Card (masked):   {mask_pan(txn.get('cc_num'))}
 Transaction Amount:     ${txn.get('amt', 0.0):.2f}
 Merchant Name:          {txn.get('merchant', 'N/A')}
@@ -250,7 +265,7 @@ NARRATIVE:
         receipt=receipt,
         actor=actor,
         actor_role=actor_role,
-        principal=principal,
+        principal=identity,
         expected_version=expected_case_version,
     )
     archive = receipt.archive_receipt
@@ -284,7 +299,7 @@ def _highest_risk_alert(sample_size):
     """
     import duckdb
 
-    from scripts.config import ARTIFACTS_DIR, DB_PATH
+    from scripts.config import ARTIFACTS_DIR, DB_PATH, resolve_model_dir
     from scripts.inference_engine import (load_models, run_inference,
                                           select_highest_risk_alert)
 
@@ -300,10 +315,11 @@ def _highest_risk_alert(sample_size):
     finally:
         con.close()
 
-    meta_probs, p_m2, p_m3, p_m4, triggered = run_inference(df, *load_models(ARTIFACTS_DIR))
+    model_dir = resolve_model_dir(ARTIFACTS_DIR)
+    meta_probs, p_m2, p_m3, p_m4, triggered = run_inference(df, *load_models(model_dir))
     i = select_highest_risk_alert(meta_probs, triggered)
     return (df.iloc[i].to_dict(), float(p_m2[i]), float(p_m3[i]),
-            float(p_m4[i]), float(meta_probs[i]), int(triggered.sum()), len(df))
+            float(p_m4[i]), float(meta_probs[i]), int(triggered.sum()), len(df), model_dir.name)
 
 
 def main():
@@ -332,7 +348,7 @@ def main():
     print("=== INVESTIGATION NARRATIVE DRAFTING ASSISTANT ===")
     print(f"Scoring {args.sample_size} development-holdout transactions with demo artifacts...")
     try:
-        txn, p_m2, p_m3, p_m4, meta_score, n_alerts, n_scored = _highest_risk_alert(
+        txn, p_m2, p_m3, p_m4, meta_score, n_alerts, n_scored, model_version = _highest_risk_alert(
             args.sample_size)
     except NoAlertsInSample as e:
         print(f"No narrative draft generated: {e}")
@@ -362,6 +378,7 @@ def main():
             narrative,
             args.output_dir,
             case_id=args.case_id,
+            model_version=model_version,
             principal=principal,
             expected_case_version=args.expected_case_version,
             case_store=CaseStore(principal=principal),

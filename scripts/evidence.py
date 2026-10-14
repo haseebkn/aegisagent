@@ -56,7 +56,10 @@ def verify_file(path: str | Path, expected_sha256: str, expected_size: int) -> l
     evidence_path = Path(path)
     if not evidence_path.is_file():
         return [f"Evidence file is missing: {evidence_path}"]
-    payload = evidence_path.read_bytes()
+    try:
+        payload = evidence_path.read_bytes()
+    except OSError:
+        return [f"Evidence file cannot be read: {evidence_path}"]
     issues = []
     if len(payload) != expected_size:
         issues.append(
@@ -174,7 +177,7 @@ def archive_to_s3(
         raise ArchiveVerificationError(
             "S3 did not return the expected SHA-256 checksum; archive is not verified"
         )
-    if not version_id:
+    if not version_id or version_id == "null":
         raise ArchiveVerificationError(
             "S3 did not return a VersionId; archive is not verified as versioned"
         )

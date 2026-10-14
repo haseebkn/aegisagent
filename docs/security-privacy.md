@@ -87,6 +87,13 @@ details. Narrative content is suppressed from CLI and pipeline-verification stdo
 These controls are defense in depth; sensitive payloads should not be logged in the
 first place.
 
+Release 0.8.0 escapes dynamic narrative HTML, redacts provider output before
+preservation, and checks evidence authorization before local or cloud writes.
+Production also rejects an explicitly injected local-development principal. Compose
+publishes only on loopback and no longer mounts the developer's AWS credential
+directory. Patched dependency pins and a CI advisory scan reduce known dependency
+risk but do not replace a penetration test or ongoing updates.
+
 Local case databases and evidence directories receive owner-only permission requests
 (`0700` directories and `0600` files). Enforcement ultimately depends on the host
 filesystem. S3 uploads request AES-256 encryption and the bucket policy denies

@@ -60,6 +60,14 @@ then requires that exact registered report and rechecks the candidate artifacts 
 current champion. A caller therefore cannot obtain eligibility by supplying a report
 whose gates are merely marked `true`.
 
+Release 0.8.0 also independently loads the registered models and re-scores the
+development holdout, requiring the complete report to match that evaluation. The
+report binds a data digest and bootstrap sample count. Registry state is replayed
+from its events, artifact hashes are checked before deserialization, and local
+registry mutations are serialized. This does not create distributed transactions:
+a crash between pointer and registry writes deliberately leaves serving fail-closed
+until the two are recovered consistently.
+
 ## Analyst feedback semantics
 
 `operational_feedback.py` aggregates case volume, terminal RGS outcomes, reached rate,

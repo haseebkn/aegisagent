@@ -48,6 +48,16 @@ The verifier checks:
 The command exits with status 2 when any check fails. The dashboard exposes the same
 verification and inventory.
 
+Release 0.8.0 additionally checks projection status, assignment and timestamps,
+committed alert fields and evidence creator/time. Opening a modern store never
+repairs a blank event hash: that is corruption to report, not a migration to re-sign.
+Legacy formats lacking an originally committed field cannot retrospectively prove
+that field's integrity. Narrative preservation is authorized before file/cloud I/O
+and bound to the case's original model version and score; attachment rechecks the
+case version under a transaction. A concurrent authorized update can still leave an
+unlinked preserved file, so production requires reconciliation rather than deleting
+potential evidence automatically.
+
 ## Security boundary
 
 This detects corruption, missing files, accidental edits, stale writes, and ordinary

@@ -19,6 +19,7 @@ The output is advisory and structured. Nothing here decides on its own to discar
 report -- see `docs/str-narrative-design.md` for why that matters.
 """
 import re
+from datetime import datetime
 from dataclasses import dataclass, field
 
 # Quantities in prose: 1,234.56 / $7,500.00 / 84.8% / -85.7476
@@ -27,7 +28,10 @@ _NUMBER_RE = re.compile(r"-?\$?\d[\d,]*(?:\.\d+)?%?")
 # Small integers used for list numbering, and constants that name the windows and
 # frameworks this report is built on (24h, 7d, 5W+H). Matching these against the
 # payload would produce noise, not signal.
-_STRUCTURAL_VALUES = set(range(0, 11)) | {12, 24, 7, 5, 100, 1000}
+_STRUCTURAL_PATTERN = re.compile(
+    r"(?m)^\s*\d+[.)]\s+|\b(?:24\s*[- ]?\s*h(?:our)?s?|7\s*[- ]?\s*d(?:ay)?s?|5W\+H|model\s+[234])\b",
+    re.IGNORECASE,
+)
 
 # Assertions about data the pipeline does not carry. The model has no prior
 # transaction, no device, no IP, no counterparty and no KYC record -- any claim
@@ -98,10 +102,8 @@ def allowed_values(txn, p_m2, p_m3, p_m4, meta_score):
         vals.add(abs(round(f, 2)))
 
     numeric_fields = [
-        'amt', 'distance_km', 'card_mean_amt', 'card_std_amt', 'amt_z_card',
-        'amt_over_mean_card', 'txns_24h', 'txns_7d', 'category_risk', 'state_risk',
-        'merchant_risk', 'card_txn_cnt', 'lat', 'long', 'merch_lat', 'merch_long',
-        'zip', 'city_pop', 'hour', 'day_of_week', 'night', 'is_online', 'log_amt',
+        'amt', 'distance_km', 'card_mean_amt', 'amt_z_card',
+        'txns_24h', 'txns_7d', 'category_risk', 'night',
     ]
     for f in numeric_fields:
         add(txn.get(f))
@@ -119,7 +121,7 @@ def allowed_values(txn, p_m2, p_m3, p_m4, meta_score):
         add(score * 100)
 
     # Risk encodings are far more likely to be quoted as percentages.
-    for f in ('category_risk', 'state_risk', 'merchant_risk'):
+    for f in ('category_risk',):
         v = txn.get(f)
         if v is not None:
             add(float(v) * 100)
@@ -132,24 +134,10 @@ def allowed_values(txn, p_m2, p_m3, p_m4, meta_score):
         add(ratio * 100)
         add((ratio - 1.0) * 100)          # "1,442% above the cardholder's mean"
         add(float(amt) - float(mean_amt))
-    std = txn.get('card_std_amt')
-    if amt and mean_amt and std:
-        add((float(amt) - float(mean_amt)) / float(std))
-    v24, v7 = txn.get('txns_24h'), txn.get('txns_7d')
-    if v24 and v7:
-        add(float(v7) / float(v24))
-        add(float(v7) - float(v24))
-
-    # Date and time components from the transaction timestamp.
-    ts = txn.get('trans_date_trans_time')
-    if ts is not None:
-        for part in re.findall(r"\d+", str(ts)):
-            add(int(part))
-
     return vals
 
 
-def _is_grounded(value, allowed, rel_tol=0.01, abs_tol=0.01):
+def _is_grounded(value, allowed, rel_tol=0, abs_tol=1e-6):
     for a in allowed:
         if abs(value - a) <= max(abs_tol, abs(a) * rel_tol):
             return True
@@ -159,6 +147,9 @@ def _is_grounded(value, allowed, rel_tol=0.01, abs_tol=0.01):
 def check_narrative(narrative, txn, p_m2, p_m3, p_m4, meta_score):
     """Return a GroundingReport for one generated narrative."""
     report = GroundingReport()
+    if not isinstance(narrative, str) or not narrative.strip():
+        report.unavailable_claims.append(("empty narrative", "no draft content was supplied"))
+        return report
     allowed = allowed_values(txn, p_m2, p_m3, p_m4, meta_score)
 
     # Ignore numbers inside legal citations, which name statutes rather than facts.
@@ -166,27 +157,39 @@ def check_narrative(narrative, txn, p_m2, p_m3, p_m4, meta_score):
                       " ", narrative, flags=re.IGNORECASE)
     scrubbed = re.sub(r"\bPCMLTFA[\s,]*[\d.()]*", " PCMLTFA ", scrubbed, flags=re.IGNORECASE)
 
-    # Dates and clock times are structural. Verify their components against the
-    # payload timestamp, then remove them, so the hyphens in an ISO date are not
-    # parsed as minus signs on the following number.
-    _DATETIME_RE = r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}(?::\d{2})?"
-    ts_parts = {int(x) for x in re.findall(r"\d+", str(txn.get('trans_date_trans_time', '')))}
-    # Narratives routinely render a 24-hour timestamp on a 12-hour clock, so 23:04
-    # legitimately appears as "11:04 PM".
-    ts_parts |= {h % 12 or 12 for h in list(ts_parts) if 0 <= h <= 23}
-    for match in re.findall(_DATETIME_RE, scrubbed):
-        components = {int(x) for x in re.findall(r"\d+", match)}
-        if components <= ts_parts:
+    # Match ordered dates and times, including the correct AM/PM period. A set of
+    # timestamp components falsely accepted swapped month/day and morning/night.
+    datetime_pattern = r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AP]M)?\b"
+    try:
+        timestamp = datetime.fromisoformat(str(txn.get("trans_date_trans_time", "")))
+    except ValueError:
+        timestamp = None
+    for match in re.findall(datetime_pattern, scrubbed, re.IGNORECASE):
+        grounded = False
+        if timestamp is not None:
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", match):
+                grounded = match == timestamp.date().isoformat()
+            else:
+                clock = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*([AP]M))?", match, re.IGNORECASE)
+                hour, minute = int(clock[1]), int(clock[2])
+                period = clock[4]
+                valid_hour = 1 <= hour <= 12 if period else 0 <= hour <= 23
+                if period:
+                    hour = hour % 12 + (12 if period.upper() == "PM" else 0)
+                grounded = (
+                    valid_hour and hour == timestamp.hour and minute == timestamp.minute
+                    and (clock[3] is None or int(clock[3]) == timestamp.second)
+                )
+        if grounded:
             report.grounded.append(match)
         else:
             report.ungrounded.append(match)
-    scrubbed = re.sub(_DATETIME_RE, " ", scrubbed)
+    scrubbed = re.sub(datetime_pattern, " ", scrubbed, flags=re.IGNORECASE)
+    scrubbed = _STRUCTURAL_PATTERN.sub(" ", scrubbed)
 
     for token in _NUMBER_RE.findall(scrubbed):
         value = _parse(token)
         if value is None:
-            continue
-        if value in _STRUCTURAL_VALUES and float(value).is_integer():
             continue
         if _is_grounded(value, allowed):
             report.grounded.append(token)

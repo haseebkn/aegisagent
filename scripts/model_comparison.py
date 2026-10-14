@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, brier_score_loss
 
+from scripts.evaluation_utils import calendar_span_days, validate_binary_probabilities
+
 
 class ComparisonError(RuntimeError):
     pass
@@ -26,13 +28,15 @@ PROMOTION_POLICY = {
 
 
 def operating_metrics(y, probabilities, threshold, timestamps) -> dict[str, float | int]:
-    y = np.asarray(y, dtype=int)
-    probabilities = np.asarray(probabilities, dtype=float)
+    y, probabilities = validate_binary_probabilities(y, probabilities)
+    if isinstance(threshold, bool) or not np.isscalar(threshold) or not np.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ComparisonError("Threshold must be a finite probability")
+    if len(timestamps) != len(y):
+        raise ComparisonError("Timestamps must match evaluation rows")
     predicted = probabilities >= threshold
     positives = y == 1
     true_positive = predicted & positives
-    span = pd.to_datetime(timestamps)
-    days = max((span.max() - span.min()).days, 1)
+    days = calendar_span_days(timestamps)
     return {
         "pr_auc": float(average_precision_score(y, probabilities)),
         "brier": float(brier_score_loss(y, probabilities)),
@@ -54,12 +58,14 @@ def paired_day_block_pr_auc_delta(
     seed: int = 42,
 ) -> tuple[float, float]:
     """Bootstrap candidate-minus-champion PR AUC by resampling whole calendar days."""
-    if samples < 20:
+    if type(samples) is not int or samples < 20:
         raise ComparisonError("At least 20 paired bootstrap samples are required")
-    y = np.asarray(y, dtype=int)
-    champion = np.asarray(champion_probabilities, dtype=float)
-    candidate = np.asarray(candidate_probabilities, dtype=float)
-    days = pd.to_datetime(timestamps).normalize().to_numpy()
+    y, champion = validate_binary_probabilities(y, champion_probabilities)
+    _, candidate = validate_binary_probabilities(y, candidate_probabilities)
+    span = pd.DatetimeIndex(pd.to_datetime(timestamps))
+    if len(span) != len(y) or span.hasnans:
+        raise ComparisonError("Valid timestamps must match evaluation rows")
+    days = span.normalize().to_numpy()
     unique_days = np.unique(days)
     if len(unique_days) < 2:
         raise ComparisonError("Paired comparison requires at least two calendar days")
@@ -98,6 +104,9 @@ def build_comparison(
     brier_tolerance: float = PROMOTION_POLICY["brier_tolerance"],
     max_alerts_per_day: float = PROMOTION_POLICY["max_alerts_per_day"],
 ) -> dict[str, Any]:
+    policy_values = (noninferiority_margin, recall_tolerance, brier_tolerance, max_alerts_per_day)
+    if any(type(value) not in {int, float} or not np.isfinite(value) or value < 0 for value in policy_values):
+        raise ComparisonError("Policy limits must be finite nonnegative numbers")
     champion = operating_metrics(y, champion_probabilities, champion_threshold, timestamps)
     candidate = operating_metrics(y, candidate_probabilities, candidate_threshold, timestamps)
     interval = paired_day_block_pr_auc_delta(
@@ -117,6 +126,7 @@ def build_comparison(
         "schema_version": 1,
         "evaluation_role": "development_holdout",
         "historically_pristine": False,
+        "bootstrap_samples": bootstrap_samples,
         "champion_version": champion_version,
         "candidate_version": candidate_version,
         "champion_manifest_sha256": champion_manifest_sha256,

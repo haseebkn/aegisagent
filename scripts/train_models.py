@@ -35,13 +35,25 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.config import ARTIFACTS_DIR, DB_PATH
 from scripts.model_registry import import_existing_champion, register_version
 from scripts.modeling import fit_stacked_ensemble, score_base_models
+from scripts.modeling import freeze_target_encodings
+from scripts.evaluation_utils import calendar_span_days
 
 
 def chronological_split(df, fractions=(0.70, 0.15, 0.15)):
-    df = df.sort_values('trans_date_trans_time').reset_index(drop=True)
+    if (len(fractions) != 3 or any(not 0 < value < 1 for value in fractions)
+            or not np.isclose(sum(fractions), 1)):
+        raise ValueError("Three positive chronological split fractions must sum to one")
+    df = df.sort_values(['trans_date_trans_time', 'trans_num']).reset_index(drop=True)
     n = len(df)
+    if n < 3 or df['trans_date_trans_time'].isna().any():
+        raise ValueError("Chronological splitting requires at least three timestamped rows")
     c1 = int(n * fractions[0])
     c2 = int(n * (fractions[0] + fractions[1]))
+    times = df['trans_date_trans_time'].to_numpy()
+    c1 = int(np.searchsorted(times, times[c1], side='left'))
+    c2 = int(np.searchsorted(times, times[c2], side='left'))
+    if not 0 < c1 < c2 < n:
+        raise ValueError("Timestamp groups leave an empty chronological fitting window")
     return df.iloc[:c1].copy(), df.iloc[c1:c2].copy(), df.iloc[c2:].copy()
 
 
@@ -83,9 +95,17 @@ def main():
     args = parser.parse_args()
 
     print(f"Connecting to DuckDB at {DB_PATH}...")
-    con = duckdb.connect(str(DB_PATH))
-    df = con.execute("SELECT * FROM fct_fraud_features").df()
-    con.close()
+    with duckdb.connect(str(DB_PATH), read_only=True) as con:
+        # Labels from the final tail never enter an ordinary training process.
+        df = con.execute("""
+            SELECT f.*, t.category, t.state, t.merchant
+            FROM fct_fraud_features f
+            LEFT JOIN stg_transactions_train t USING (trans_num)
+            WHERE f.evaluation_role <> 'locked_evaluation' OR ?
+        """, [args.unlock_final_evaluation]).df()
+        locked_row_count = con.execute("""
+            SELECT COUNT(*) FROM fct_fraud_features WHERE evaluation_role = 'locked_evaluation'
+        """).fetchone()[0]
     print(f"Total rows loaded: {len(df):,}")
 
     train_full_df = df[df['dataset_split'] == 'train'].copy()
@@ -93,9 +113,14 @@ def main():
     locked_df = df[df['evaluation_role'] == 'locked_evaluation'].copy()
 
     base_df, blend_df, calib_df = chronological_split(train_full_df)
+    # The maps must not learn from labels inside the window being scored.
+    blend_df = freeze_target_encodings(base_df, blend_df)
+    history_before_calib = train_full_df[
+        train_full_df['trans_date_trans_time'] < calib_df['trans_date_trans_time'].min()]
+    calib_df = freeze_target_encodings(history_before_calib, calib_df)
     print(f"Chronological split -> base: {len(base_df):,} | blend: {len(blend_df):,} "
           f"| calib: {len(calib_df):,} | development holdout: {len(test_df):,} "
-          f"| prospectively locked: {len(locked_df):,}")
+          f"| prospectively locked: {locked_row_count:,}")
 
     y_base = base_df['is_fraud'].values
     y_blend = blend_df['is_fraud'].values
@@ -151,8 +176,7 @@ def main():
 
     # Alert-volume framing: what this threshold actually costs an investigations team.
     alerts = int(meta_preds.sum())
-    days = max((test_df['trans_date_trans_time'].max()
-                - test_df['trans_date_trans_time'].min()).days, 1)
+    days = calendar_span_days(test_df['trans_date_trans_time'])
     print(f"\nOperational load: {alerts:,} alerts over {days} days "
           f"({alerts / days:.1f}/day) at {te_prec:.1%} precision, "
           f"catching {int(cm[1][1]):,} of {int(y_te.sum()):,} frauds.")
@@ -167,8 +191,7 @@ def main():
         locked_pred = locked_meta >= best_thresh
         locked_prec, locked_rec, locked_f1, _ = precision_recall_fscore_support(
             locked_y, locked_pred, average="binary", zero_division=0)
-        locked_days = max((locked_df["trans_date_trans_time"].max()
-                           - locked_df["trans_date_trans_time"].min()).days, 1)
+        locked_days = calendar_span_days(locked_df["trans_date_trans_time"])
         locked_metrics = {
             "rows": len(locked_df),
             "positives": int(locked_y.sum()),
@@ -190,9 +213,9 @@ def main():
               f"precision={locked_prec:.1%}, recall={locked_rec:.1%}")
 
     # ---------------- PERSIST ARTIFACTS ----------------
-    version_str = f"v_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    version_str = f"v_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
     versioned_dir = ARTIFACTS_DIR / version_str
-    versioned_dir.mkdir(parents=True, exist_ok=True)
+    versioned_dir.mkdir(parents=True, exist_ok=False)
 
     print(f"\nSaving versioned model artifacts to {versioned_dir}...")
     joblib.dump(rf_geo, versioned_dir / "model_2_geo_rf.joblib")
@@ -207,9 +230,10 @@ def main():
         "version": version_str,
         "split_rows": {"base": len(base_df), "blend": len(blend_df),
                        "calib": len(calib_df), "development_holdout": len(test_df),
-                       "locked_evaluation": len(locked_df)},
+                       "locked_evaluation": locked_row_count},
         "feature_semantics": "causal_prior_only_90d_v1",
         "evaluation_protocol": {
+            "internal_encoding_maps": "frozen before blend and calibration windows",
             "development_role": "development_holdout",
             "locked_role": "locked_evaluation",
             "locked_fraction": 0.25,
@@ -265,10 +289,9 @@ def main():
             f"{registry['champion']} until an authorized promotion."
         )
 
-    protected = {
-        version for version, record in registry["versions"].items()
-        if record["status"] in {"champion", "candidate"}
-    }
+    # Archived versions remain valid rollback targets. Registry deletion requires
+    # an explicit lifecycle decision and cannot be an incidental training side effect.
+    protected = set(registry["versions"])
     removed = prune_old_versions(ARTIFACTS_DIR, max(args.keep, 0), protected)
     if removed:
         print(f"Pruned {len(removed)} superseded version(s): {', '.join(removed)}")

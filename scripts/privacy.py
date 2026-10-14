@@ -47,7 +47,12 @@ PROHIBITED_EXTERNAL_FIELDS = frozenset(
 
 _SECRET_PATTERNS = (
     re.compile(r"\b(?:sk|pk)_(?:test|live)_[A-Za-z0-9_-]+\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    re.compile(r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{16,}\b"),
+    re.compile(
+        r"(?i)((?:aws_secret_access_key|aws_session_token|secret_access_key|api_key)"
+        r"\s*[=:]\s*['\"]?)[^\s'\",;]+"
+    ),
     re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._~+/-]+=*"),
 )
 _PAN_PATTERN = re.compile(r"(?<!\d)(?:\d[ -]?){12,19}(?!\d)")

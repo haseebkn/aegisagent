@@ -1,16 +1,25 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
 import pytest
+import duckdb
+import joblib
+from sklearn.dummy import DummyClassifier
+from sklearn.preprocessing import StandardScaler
 
 from scripts.case_management import CaseEvent, CaseRecord
-from scripts.model_comparison import PROMOTION_POLICY, build_comparison
+from scripts import model_registry
+from scripts.config import FEAT_M2, FEAT_M3, FEAT_M4
+from scripts.inference_engine import SCORED_FEATURES, load_models
+from scripts.model_comparison import build_comparison
 from scripts.model_registry import (
     REQUIRED_ARTIFACTS,
     RegistryError,
+    evaluate_registered_comparison,
     load_registry,
     promote_candidate,
     record_comparison,
@@ -29,36 +38,38 @@ from scripts.security import (
 def artifact_version(root, version, marker):
     directory = root / version
     directory.mkdir()
-    for name in REQUIRED_ARTIFACTS:
-        (directory / name).write_text(f"{marker}:{name}", encoding="utf-8")
+    for name, features in [
+        ("model_2_geo_rf.joblib", len(FEAT_M2)),
+        ("model_3_cat_xgb.joblib", len(FEAT_M3)),
+        ("model_4_vel_rf.joblib", len(FEAT_M4)),
+        ("meta_model.joblib", 3),
+    ]:
+        model = DummyClassifier(strategy="prior").fit(np.zeros((10, features)), [1] + [0] * 9)
+        joblib.dump(model, directory / name)
+    joblib.dump(StandardScaler().fit(np.zeros((10, len(FEAT_M4)))), directory / "model_4_scaler.joblib")
+    (directory / "meta_threshold.txt").write_text("0.5", encoding="utf-8")
+    (directory / "training_metrics.json").write_text(json.dumps({"marker": marker}), encoding="utf-8")
+    assert all((directory / name).exists() for name in REQUIRED_ARTIFACTS)
     return directory
 
 
-def eligible_report(registry, candidate):
-    return {
-        "schema_version": 1,
-        "evaluation_role": "development_holdout",
-        "historically_pristine": False,
-        "eligible": True,
-        "champion_version": registry["champion"],
-        "candidate_version": candidate,
-        "champion_manifest_sha256": registry["versions"][registry["champion"]][
-            "manifest_sha256"
-        ],
-        "candidate_manifest_sha256": registry["versions"][candidate]["manifest_sha256"],
-        "rows": 100,
-        "positives": 10,
-        "champion": {"recall": 0.8, "brier": 0.1},
-        "candidate": {"recall": 0.8, "brier": 0.1, "alerts_per_day": 1.0},
-        "paired_pr_auc_delta_ci_95": [0.0, 0.0],
-        "policy": PROMOTION_POLICY,
-        "gates": {
-            "paired_pr_auc_noninferiority": True,
-            "recall_noninferiority": True,
-            "calibration_noninferiority": True,
-            "alert_capacity": True,
-        },
-    }
+@pytest.fixture(autouse=True)
+def governed_holdout(tmp_path, monkeypatch):
+    frame = pd.DataFrame({column: np.zeros(100) for column in SCORED_FEATURES})
+    frame["trans_num"] = [f"txn-{index:03}" for index in range(100)]
+    frame["is_fraud"] = [index % 10 == 0 for index in range(100)]
+    frame["trans_date_trans_time"] = pd.date_range("2026-01-01", periods=100, freq="8h")
+    frame["evaluation_role"] = "development_holdout"
+    database = tmp_path / "holdout.duckdb"
+    with duckdb.connect(str(database)) as con:
+        con.execute("CREATE TABLE fct_fraud_features AS SELECT * FROM frame")
+    monkeypatch.setattr(model_registry, "DB_PATH", database)
+
+
+def eligible_report(registry, candidate, root):
+    return evaluate_registered_comparison(
+        candidate, artifacts_dir=root, registry_path=root / "registry.json", bootstrap_samples=100,
+    )
 
 
 def governance_principal(role=MODEL_GOVERNANCE_REVIEWER):
@@ -102,7 +113,7 @@ def test_eligible_candidate_requires_human_promotion_and_supports_rollback(tmp_p
     )
     registry = register_version("v2", artifacts_dir=tmp_path, registry_path=registry_path)
     report_path = tmp_path / "v2" / "promotion_report.json"
-    report_path.write_text(json.dumps(eligible_report(registry, "v2")), encoding="utf-8")
+    report_path.write_text(json.dumps(eligible_report(registry, "v2", tmp_path)), encoding="utf-8")
     identity = governance_principal()
     record_comparison(
         report_path,
@@ -152,7 +163,7 @@ def test_artifact_or_registry_tampering_blocks_governance(tmp_path):
     )
     registry = register_version("v2", artifacts_dir=tmp_path, registry_path=registry_path)
     report_path = tmp_path / "v2" / "promotion_report.json"
-    report_path.write_text(json.dumps(eligible_report(registry, "v2")), encoding="utf-8")
+    report_path.write_text(json.dumps(eligible_report(registry, "v2", tmp_path)), encoding="utf-8")
     identity = governance_principal()
     record_comparison(
         report_path,
@@ -189,7 +200,7 @@ def test_governance_domain_rejects_wrong_role_and_fabricated_report(tmp_path):
         bootstrap_champion=True,
     )
     registry = register_version("v2", artifacts_dir=tmp_path, registry_path=registry_path)
-    report = eligible_report(registry, "v2")
+    report = eligible_report(registry, "v2", tmp_path)
     report_path = tmp_path / "v2" / "promotion_report.json"
     report_path.write_text(json.dumps(report), encoding="utf-8")
     with pytest.raises(PermissionDenied):
@@ -213,7 +224,7 @@ def test_governance_domain_rejects_wrong_role_and_fabricated_report(tmp_path):
     report["champion_manifest_sha256"] = registry["versions"]["v1"][
         "manifest_sha256"
     ]
-    report["candidate"]["recall"] = 0.0
+    report["champion"]["recall"] = 1.0
     report_path.write_text(json.dumps(report), encoding="utf-8")
     with pytest.raises(RegistryError, match="gates do not match"):
         record_comparison(
@@ -222,6 +233,60 @@ def test_governance_domain_rejects_wrong_role_and_fabricated_report(tmp_path):
             artifacts_dir=tmp_path,
             registry_path=registry_path,
         )
+
+
+def test_consistently_forged_metrics_cannot_be_registered(tmp_path):
+    registry_path = tmp_path / "registry.json"
+    artifact_version(tmp_path, "v1", "champion")
+    artifact_version(tmp_path, "v2", "candidate")
+    register_version("v1", artifacts_dir=tmp_path, registry_path=registry_path, bootstrap_champion=True)
+    registry = register_version("v2", artifacts_dir=tmp_path, registry_path=registry_path)
+    report = eligible_report(registry, "v2", tmp_path)
+    report["candidate"]["recall"] = 1.0
+    report["candidate"]["pr_auc"] = 1.0
+    report_path = tmp_path / "v2" / "promotion_report.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(RegistryError, match="independent holdout"):
+        record_comparison(report_path, principal=governance_principal(), artifacts_dir=tmp_path, registry_path=registry_path)
+    assert "comparison_report_sha256" not in load_registry(registry_path)["versions"]["v2"]
+
+
+@pytest.mark.parametrize("field,value", [("status", "champion"), ("comparison_report_sha256", "f" * 64), ("manifest_sha256", "f" * 64)])
+def test_materialized_registry_state_cannot_bypass_event_history(tmp_path, field, value):
+    registry_path = tmp_path / "registry.json"
+    artifact_version(tmp_path, "v1", "champion")
+    artifact_version(tmp_path, "v2", "candidate")
+    register_version("v1", artifacts_dir=tmp_path, registry_path=registry_path, bootstrap_champion=True)
+    registry = register_version("v2", artifacts_dir=tmp_path, registry_path=registry_path)
+    registry["versions"]["v2"][field] = value
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    with pytest.raises(RegistryError):
+        load_registry(registry_path)
+
+
+def test_serving_checks_artifact_integrity_before_deserializing(tmp_path, monkeypatch):
+    directory = artifact_version(tmp_path, "v1", "champion")
+    register_version("v1", artifacts_dir=tmp_path, registry_path=tmp_path / "registry.json", bootstrap_champion=True)
+    (directory / "meta_model.joblib").write_bytes(b"tampered pickle")
+    def forbidden_load(path):
+        pytest.fail("Tampered pickle reached deserialization")
+    monkeypatch.setattr("scripts.inference_engine.joblib_load", forbidden_load)
+    for path in (tmp_path, directory):
+        with pytest.raises(RegistryError, match="changed after registration"):
+            load_models(path)
+
+
+def test_parallel_registration_preserves_every_version_and_event(tmp_path):
+    versions = [f"v{index}" for index in range(8)]
+    for version in versions:
+        artifact_version(tmp_path, version, version)
+    def register(version):
+        return register_version(version, artifacts_dir=tmp_path, registry_path=tmp_path / "registry.json")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(register, versions))
+    registry = load_registry(tmp_path / "registry.json")
+    assert set(registry["versions"]) == set(versions)
+    assert len(registry["events"]) == len(versions)
 
 
 def test_paired_comparison_passes_identical_candidate_and_rejects_degraded_one():
