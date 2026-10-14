@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # are retained for review/rollback; prepare a dedicated build artifact store if size
 # matters. CI builds a single tiny fixture version.
 COPY --chown=aegis:aegis dbt_project.yml profiles.yml app.py service.py ./
+COPY --chown=aegis:aegis .streamlit/ ./.streamlit/
 COPY --chown=aegis:aegis models/ ./models/
 COPY --chown=aegis:aegis macros/ ./macros/
 COPY --chown=aegis:aegis scripts/ ./scripts/

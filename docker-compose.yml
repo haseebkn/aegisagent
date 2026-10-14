@@ -1,34 +1,67 @@
+x-aegis-runtime: &aegis-runtime
+  image: aegisagent:local
+  environment:
+    DBT_DB_PATH: /app/aegis_db.duckdb
+    DBT_PROFILES_DIR: /app
+    AEGIS_RAW_DATA_DIR: /app
+    MODELS_ARTIFACTS_DIR: /app/models_artifacts
+    COMPLIANCE_LOGS_DIR: /app/compliance_logs
+    AEGIS_SECURITY_MODE: development
+    AEGIS_DEV_SUBJECT: ${AEGIS_DEV_SUBJECT:-local-investigator}
+    AEGIS_DEV_ROLES: ${AEGIS_DEV_ROLES:-investigator}
+    AEGIS_DEV_ORGANIZATION: ${AEGIS_DEV_ORGANIZATION:-local-demo}
+    AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+    COMPLIANCE_S3_BUCKET: ${COMPLIANCE_S3_BUCKET:-}
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+    OMP_NUM_THREADS: "2"
+  volumes:
+    - type: bind
+      source: ./aegis_db.duckdb
+      target: /app/aegis_db.duckdb
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./fraudTest.csv
+      target: /app/fraudTest.csv
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: volume
+      source: aegis_case_data
+      target: /app/compliance_logs
+  networks:
+    - aegis_net
+
 services:
   aegis_app:
+    <<: *aegis-runtime
     build:
       context: .
       dockerfile: Dockerfile
     container_name: aegis_app
     command: ["uvicorn", "service:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "127.0.0.1:8000:8000"
-    environment:
-      - DBT_DB_PATH=/app/aegis_db.duckdb
-      - DBT_PROFILES_DIR=/app
-      - AEGIS_RAW_DATA_DIR=/app
-      - MODELS_ARTIFACTS_DIR=/app/models_artifacts
-      - COMPLIANCE_LOGS_DIR=/app/compliance_logs
-      # The local identity provider is intentionally unavailable in production mode.
-      - AEGIS_SECURITY_MODE=development
-      - AEGIS_DEV_SUBJECT=${AEGIS_DEV_SUBJECT:-local-investigator}
-      - AEGIS_DEV_ROLES=${AEGIS_DEV_ROLES:-investigator}
-      - AEGIS_DEV_ORGANIZATION=${AEGIS_DEV_ORGANIZATION:-local-demo}
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
-      - COMPLIANCE_S3_BUCKET=${COMPLIANCE_S3_BUCKET:-}
-    volumes:
-      # Data and credentials only. Application code comes from the image, so a
-      # broken image fails here instead of being papered over by a bind mount.
-      - ./aegis_db.duckdb:/app/aegis_db.duckdb
-      - ./compliance_logs:/app/compliance_logs
-    networks:
-      - aegis_net
+      - "127.0.0.1:${AEGIS_API_PORT:-8002}:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+  aegis_dashboard:
+    <<: *aegis-runtime
+    pull_policy: never
+    depends_on:
+      aegis_app:
+        condition: service_healthy
+    container_name: aegis_dashboard
+    command: ["streamlit", "run", "app.py", "--server.address", "0.0.0.0", "--server.port", "8501", "--server.headless", "true"]
+    ports:
+      - "127.0.0.1:${AEGIS_DASHBOARD_PORT:-8502}:8501"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -37,3 +70,6 @@ services:
 networks:
   aegis_net:
     driver: bridge
+
+volumes:
+  aegis_case_data:

@@ -62,7 +62,13 @@ model versions and presenting them as model output.
 
 ## Deployment boundary and deferrals
 
-Docker Compose runs this API for local demonstration. The image itself still defaults
+Docker Compose runs the API at `127.0.0.1:8002` and the dashboard at
+`127.0.0.1:8502` for local demonstration. Their ports can be overridden with
+`AEGIS_API_PORT` and `AEGIS_DASHBOARD_PORT`; both share the case store and image.
+The shared `aegis_case_data` volume supports the non-root case/evidence permissions
+on Docker Desktop and persists through container recreation. Direct Python runs
+use the existing host `compliance_logs/` directory independently.
+The image itself still defaults
 to the batch verifier used by the existing ECS reference task. Terraform does not
 expose the API, and no claim is made that it is deployed.
 

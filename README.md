@@ -30,7 +30,8 @@ python -m scripts.demo --serve
 
 This creates 14,500 fixture transactions in a new `.demo/run-*` directory, builds the
 real dbt feature mart, trains a small model bundle, verifies inference and case/evidence
-integrity, runs the drift gate, then starts the dashboard at `http://127.0.0.1:8501`.
+integrity, runs the drift gate, then starts the dashboard at `http://127.0.0.1:8502`.
+Use `--port PORT` or `AEGIS_DASHBOARD_PORT` to choose another dashboard port.
 Omit `--serve` for automated verification. No dataset download or cloud credentials
 are needed. Fixture scores verify software behavior; they are not research results.
 Python 3.11 is the CI/container reference environment.
@@ -190,13 +191,40 @@ streamlit run app.py
 To run the Phase 5 case API locally with the explicitly development-only identity:
 
 ```bash
-AEGIS_SECURITY_MODE=development uvicorn service:app --reload
-# Windows PowerShell: $env:AEGIS_SECURITY_MODE='development'; uvicorn service:app --reload
+AEGIS_SECURITY_MODE=development uvicorn service:app --host 127.0.0.1 --port 8002 --reload
+# Windows PowerShell: $env:AEGIS_SECURITY_MODE='development'; uvicorn service:app --host 127.0.0.1 --port 8002 --reload
 ```
 
-OpenAPI is available at `http://127.0.0.1:8000/docs`. Docker Compose starts the same
-development service on port 8000. Do not place it on a public network: production
+OpenAPI is available at `http://127.0.0.1:8002/docs`. Docker Compose starts the API on
+port 8002 and the dashboard on port 8502. Do not place them on a public network: production
 readiness intentionally fails until the later Clerk adapter verifies every request.
+
+To run both alongside other projects:
+
+```bash
+docker compose up --build -d
+```
+
+The dashboard is at `http://127.0.0.1:8502`; API documentation is at
+`http://127.0.0.1:8002/docs`. Both use the same image and case store. Compose mounts
+the feature database and `fraudTest.csv` read-only, resolving description paths in
+the container instead of using Windows paths embedded in saved dbt views. Existing
+model artifacts, the feature database, and `fraudTest.csv` must be present before
+starting. Set `AEGIS_API_PORT` and `AEGIS_DASHBOARD_PORT` in `.env` for overrides.
+
+Compose case history and evidence live in its `aegis_case_data` Docker volume,
+initialized with the image's non-root owner. This supports the case store's private
+file permissions on Windows Docker Desktop. Both services share it, and normal
+container recreation or `docker compose down` preserves it. Local Python runs
+continue to use the host `compliance_logs/` directory; those existing files are
+separate from the Compose volume.
+
+The transaction picker scans the complete development window in batches, then shows
+up to 200 actual threshold-breaching alerts, highest score first. It uses the active
+model's fixed threshold and does not use fraud labels or the locked evaluation tail
+for selection. First load takes longer on the full dataset; scores are cached by
+model version and input file fingerprints for five minutes. A dataset with no model
+alerts displays an empty-state message.
 
 Training now bootstraps a champion only in an empty artifact store. Later runs produce
 challengers and leave serving unchanged:

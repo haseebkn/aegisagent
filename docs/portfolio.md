@@ -47,6 +47,12 @@ generated paths and completed checks. No AWS or Clerk account is needed. The fix
 has an intentionally easy signal and must not be used to advertise model accuracy.
 Omit `--serve` to verify without starting a server.
 
+The dashboard uses `http://127.0.0.1:8502` by default (`--port` overrides it).
+With the original database/models available, `docker compose up --build -d` also
+starts the case API at `http://127.0.0.1:8002/docs`. The picker displays actual model
+alerts from the complete development window, ranked by score, without revealing
+ground-truth labels. A first full-data load may take longer than the fixture demo.
+
 1. Show the synthetic-data and development-identity notices.
 2. Select a threshold-breaching transaction and inspect the component scores.
 3. Create a case and start review with a rationale. Explain why a fraud score cannot

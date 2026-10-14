@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Replace the 200-row dashboard sample and hand-authored transaction with a queue
+  of actual model alerts across the full development window, scored in bounded
+  batches and ranked by score without consulting fraud labels or locked data.
+- Resolve merchant/category CSV paths at runtime so the original Windows-built
+  database also works inside Docker; invalidate cached queues when models/data change.
+- Run the API and dashboard together on loopback ports 8002 and 8502 by default,
+  with configurable port overrides and a shared image/case store.
+- Store Compose case/evidence records in an owned shared volume to support private
+  permissions under Windows Docker Desktop; keep existing host records independent.
+- Add regressions for alerts beyond row 200, ranking, locked-window exclusion,
+  thresholds, empty queues and port handling; exercise the default alert directly
+  in the dashboard smoke test.
+
 ## 0.8.0 — 2026-09-07
 
 Portfolio audit and reproducible reviewer workflow.

@@ -2,7 +2,7 @@ import sys
 import os
 import streamlit as st
 import pandas as pd
-import duckdb
+from duckdb import Error as DuckDBError
 import json
 import re
 from html import escape
@@ -14,6 +14,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from scripts.config import ARTIFACTS_DIR, DB_PATH, resolve_model_dir
+from scripts.dashboard_transactions import data_fingerprint, load_alert_queue
 from scripts.case_management import (
     CaseManagementError,
     CaseStatus,
@@ -224,80 +225,14 @@ def load_telemetry(model_dir):
 
 # Cache resource for models
 @st.cache_resource
-def load_production_models(model_dir):
+def load_production_models(model_dir, model_fingerprint):
     return load_models(model_dir)
 
-# Load database transactions
-@st.cache_data
-def get_db_transactions():
-    db_path = str(DB_PATH)
-    if not os.path.exists(db_path):
-        return []
-    
-    con = duckdb.connect(db_path, read_only=True)
-    # Pull only the descriptive fields displayed by the investigator UI.
-    query = """
-        SELECT 
-            f.*, 
-            t.merchant, 
-            t.category
-        FROM fct_fraud_features f
-        LEFT JOIN stg_transactions_test t ON f.trans_num = t.trans_num
-        WHERE f.evaluation_role = 'development_holdout'
-        ORDER BY f.trans_date_trans_time, f.trans_num
-        LIMIT 200
-    """
-    try:
-        df = con.execute(query).df()
-    finally:
-        con.close()
-    return df.to_dict(orient='records')
+@st.cache_data(ttl=300, max_entries=4)
+def get_db_transactions(db_path, model_dir, fingerprint, model_fingerprint, _models):
+    # Version and input fingerprints bind cached scores to the displayed model/data.
+    return load_alert_queue(db_path, _models)
 
-# A synthetic high-risk transaction used to exercise the STR path on demand.
-# Only the *input* is synthetic -- it carries a complete feature vector and is
-# scored by the real ensemble like every other row in the dropdown. Nothing in
-# this dashboard displays a model score that did not come out of a model.
-FRAUD_DEMO_TXN = {
-    'trans_num': 'TXN_88888',
-    'trans_date_trans_time': pd.Timestamp('2026-06-10 02:45:00'),
-    'cc_num': 9876543210987654,
-    'first': 'Alice',
-    'last': 'Smith',
-    'gender': 'F',
-    'job': 'Data Engineer',
-    'street': '123 Main Street',
-    'city': 'Boston',
-    'state': 'MA',
-    'zip': '02108',
-    'lat': 42.3601,
-    'long': -71.0589,
-    'merchant': 'fraud_Luxury_Jewelry_Store',
-    'category': 'shopping_pos',
-    'merch_lat': 51.5074,
-    'merch_long': -0.1278,
-    'amt': 7500.00,
-    'distance_km': 5262.11,
-    'night': 1,
-    'card_mean_amt': 50.00,
-    'amt_z_card': 149.00,
-    'txns_24h': 15,
-    'txns_7d': 25,
-    'category_risk': 0.015,
-    'log_amt': 8.9227,
-    'hour': 2,
-    'day_of_week': 2,
-    'hour_sin': -0.2588,
-    'hour_cos': 0.9659,
-    'is_online': 1,
-    'state_risk': 0.0034,
-    'merchant_risk': 0.0153,
-    'card_txn_cnt': 480,
-    'card_std_amt': 154.27,
-    'amt_x_catRisk': 112.5,
-    'dist_x_online': 5262.11,
-    'amt_x_night': 7500.00,
-    'is_fraud': 1
-}
 
 # Main Application Title
 st.markdown('<h1 class="app-title">🛡️ AegisAgent: Fraud Investigation Support Demo</h1>', unsafe_allow_html=True)
@@ -342,41 +277,43 @@ st.sidebar.caption(
     f"`{security_principal.organization_id}` · development only"
 )
 
-# Load data and prepare dropdown options
-txns = get_db_transactions()
-# Add demo transaction at index 0
-all_options = [FRAUD_DEMO_TXN] + txns
+try:
+    # Resolve and verify on each rerun, then use the same immutable version for
+    # telemetry, model-cache lookup, inference, and case provenance.
+    active_model_dir = resolve_model_dir(ARTIFACTS_DIR)
+    telemetry, model_version = load_telemetry(active_model_dir)
+    model_fingerprint = tuple(
+        (path.name, path.stat().st_size, path.stat().st_mtime_ns)
+        for path in sorted(active_model_dir.iterdir()) if path.is_file()
+    )
+    models = load_production_models(str(active_model_dir), model_fingerprint)
+    with st.spinner("Finding model alerts in the development data..."):
+        queue = get_db_transactions(
+            str(DB_PATH), str(active_model_dir), data_fingerprint(DB_PATH),
+            model_fingerprint, models,
+        )
+except (OSError, ValueError, RuntimeError, DuckDBError):
+    st.error("The model or transaction data could not be loaded. Check the model bundle, feature database and fraudTest.csv.")
+    st.stop()
 
-options_labels = []
-for t in all_options:
-    lbl = f"{t['trans_num']} - ${t['amt']:.2f} ({t['category']})"
-    if t['trans_num'] == 'TXN_88888':
-        lbl += " ⚠️ FRAUD DEMO"
-    elif t['is_fraud'] == 1:
-        lbl += " [FRAUD]"
-    options_labels.append(lbl)
-
+if not queue.transactions:
+    st.info("No transactions in the development data exceed this model's alert threshold.")
+    st.stop()
+all_options = queue.transactions
+options_labels = [
+    f"{t['trans_num']} - ${t['amt']:.2f} ({t['category'] or 'Unknown'}) · score {t['alert_score']:.4f}"
+    for t in all_options
+]
+st.sidebar.caption(f"Showing {len(all_options):,} of {queue.alert_count:,} model alerts, highest score first.")
 selected_idx = st.sidebar.selectbox(
-    "Choose Transaction",
-    range(len(all_options)),
-    format_func=lambda i: options_labels[i]
+    "Choose Transaction", range(len(all_options)), format_func=lambda i: options_labels[i],
 )
-
 selected_txn = all_options[selected_idx]
 st.sidebar.caption(f"Card: {mask_pan(selected_txn.get('cc_num'))}")
 
 # Sidebar: System Metadata
 st.sidebar.markdown("<div class='custom-hr'></div>", unsafe_allow_html=True)
 st.sidebar.subheader("⚙️ System Metadata")
-
-try:
-    # Resolve and verify on each rerun, then use the same immutable version for
-    # telemetry, model-cache lookup, inference, and case provenance.
-    active_model_dir = resolve_model_dir(ARTIFACTS_DIR)
-    telemetry, model_version = load_telemetry(active_model_dir)
-except (OSError, ValueError, RuntimeError):
-    st.error("The active model artifacts could not be verified. Rebuild or restore the model bundle.")
-    st.stop()
 st.sidebar.write("**Model Directory:** `models_artifacts/`")
 st.sidebar.write(f"**Active Version:** `{model_version}`")
 
@@ -450,12 +387,9 @@ st.markdown("<div class='custom-hr'></div>", unsafe_allow_html=True)
 st.subheader("🧠 Stacking Ensemble Telemetry")
 
 # Load models and threshold
-model_2, model_3, model_4, scaler_4, meta_model, threshold = load_production_models(
-    str(active_model_dir)
-)
+model_2, model_3, model_4, scaler_4, meta_model, threshold = models
 
-# Every transaction, including the synthetic demo row, is scored by the live
-# ensemble. There is deliberately no override branch here.
+# Re-score the selected alert with the same version used to build the queue.
 df_row = pd.DataFrame([selected_txn])
 try:
     meta_p, p_m2, p_m3, p_m4, triggered_alert = run_inference(

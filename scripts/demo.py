@@ -58,8 +58,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path,
                         help="An empty directory for generated demo data; defaults to .demo/run-*")
-    parser.add_argument("--serve", action="store_true", help="Launch Streamlit on 127.0.0.1:8501")
+    parser.add_argument("--serve", action="store_true", help="Launch the local dashboard")
+    parser.add_argument("--port", type=int,
+                        default=os.environ.get("AEGIS_DASHBOARD_PORT", "8502"),
+                        help="Dashboard port (default: AEGIS_DASHBOARD_PORT or 8502)")
     args = parser.parse_args(argv)
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
     if args.output_dir is not None:
         directory = args.output_dir.resolve()
         if directory.exists() and (not directory.is_dir() or any(directory.iterdir())):
@@ -94,9 +99,10 @@ def main(argv=None) -> int:
     (directory / "demo-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(f"Demo verified. Summary: {directory / 'demo-summary.json'}", flush=True)
     if args.serve:
-        print("Dashboard: http://127.0.0.1:8501 (Ctrl+C to stop)", flush=True)
+        print(f"Dashboard: http://127.0.0.1:{args.port} (Ctrl+C to stop)", flush=True)
         run([sys.executable, "-m", "streamlit", "run", "app.py",
-             "--server.address", "127.0.0.1", "--server.headless", "true"], env)
+             "--server.address", "127.0.0.1", "--server.port", str(args.port),
+             "--server.headless", "true"], env)
     return 0
 
 

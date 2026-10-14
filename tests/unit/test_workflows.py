@@ -72,7 +72,17 @@ def test_ci_uses_read_only_token_and_node24_action_generations():
 def test_demo_compose_binds_only_localhost_without_ambient_credentials():
     compose = yaml.safe_load((PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     service = compose["services"]["aegis_app"]
-    assert service["ports"] == ["127.0.0.1:8000:8000"]
-    mounts = [value.split(":") for value in service["volumes"]]
-    assert all(".aws" not in part for mount in mounts for part in mount)
-    assert "AEGIS_SECURITY_MODE=development" in service["environment"]
+    assert service["ports"] == ["127.0.0.1:${AEGIS_API_PORT:-8002}:8000"]
+    dashboard = compose["services"]["aegis_dashboard"]
+    assert dashboard["ports"] == ["127.0.0.1:${AEGIS_DASHBOARD_PORT:-8502}:8501"]
+    assert dashboard["image"] == service["image"]
+    assert dashboard["depends_on"]["aegis_app"]["condition"] == "service_healthy"
+    for item in (service, dashboard):
+        mounts = [value if isinstance(value, str) else value["source"]
+                  for value in item["volumes"]]
+        assert all(".aws" not in mount for mount in mounts)
+        assert item["environment"]["AEGIS_SECURITY_MODE"] == "development"
+        case_mount = next(mount for mount in item["volumes"]
+                          if isinstance(mount, dict) and mount["target"] == "/app/compliance_logs")
+        assert case_mount["type"] == "volume"
+        assert case_mount["source"] == "aegis_case_data"

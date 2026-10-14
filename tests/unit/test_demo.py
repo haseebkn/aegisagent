@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts.demo import demo_environment
+from scripts.demo import demo_environment, main
 from scripts import verify_pipeline
 
 
@@ -55,3 +55,24 @@ def test_offline_workflow_refuses_a_sample_without_alerts(monkeypatch):
     ))
     with pytest.raises(verify_pipeline.NoAlertsInSample):
         verify_pipeline.verify_case_workflow()
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "invalid"])
+def test_demo_rejects_invalid_port_before_writing_data(tmp_path, port):
+    destination = tmp_path / "new-demo"
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.demo", "--output-dir", str(destination), "--port", port],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert not destination.exists()
+
+
+def test_demo_server_command_uses_selected_port(tmp_path, monkeypatch):
+    from scripts import demo
+    calls = []
+    monkeypatch.setattr(demo, "run", lambda command, env: calls.append(command))
+    assert main(["--output-dir", str(tmp_path), "--serve", "--port", "8605"]) == 0
+    server = calls[-1]
+    assert server[server.index("--server.port") + 1] == "8605"
+    assert server[server.index("--server.address") + 1] == "127.0.0.1"

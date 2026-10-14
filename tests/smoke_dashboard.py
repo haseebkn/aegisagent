@@ -16,7 +16,7 @@ def main():
         from streamlit.testing.v1 import AppTest
         from scripts.case_management import CaseStore
 
-        app = AppTest.from_file("app.py", default_timeout=60).run()
+        app = AppTest.from_file("app.py", default_timeout=180).run()
 
         def healthy():
             assert not app.exception, [item.message for item in app.exception]
@@ -27,20 +27,10 @@ def main():
 
         healthy()
         picker = next(item for item in app.selectbox if item.label == "Choose Transaction")
-        # Fraud labels help locate fixture examples; alert eligibility still
-        # comes exclusively from live model inference in the dashboard.
-        candidate_indexes = [
-            index for index, label in enumerate(picker.options) if "FRAUD" in label
-        ]
-        for index in candidate_indexes:
-            next(item for item in app.selectbox if item.label == "Choose Transaction").set_value(index).run()
-            healthy()
-            create = button("Create Investigation Case")
-            if create is not None:
-                create.click().run()
-                break
-        else:
-            raise AssertionError("No real model alert available for dashboard smoke test")
+        assert picker.options, "The dashboard must offer actual model alerts"
+        create = button("Create Investigation Case")
+        assert create is not None, "The highest-scoring actual alert must be selected by default"
+        create.click().run()
         healthy()
         next(item for item in app.text_area if item.label == "Assignment rationale").set_value(
             "Scripted synthetic demonstration of the investigator assignment workflow."
