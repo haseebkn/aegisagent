@@ -1,0 +1,91 @@
+1
+00:00:00,450 --> 00:00:06,409
+AegisAgent extends my Memorial University data science capstone into a fraud investigation prototype.
+
+2
+00:00:06,409 --> 00:00:13,015
+This recording uses the original saved models and public synthetic transactions, with isolated demonstration cases.
+
+3
+00:00:14,450 --> 00:00:20,980
+The dashboard scores the complete development window and keeps the top two hundred threshold-breaching alerts.
+
+4
+00:00:20,980 --> 00:00:26,850
+Changing the selection updates the transaction profile and all three component model scores.
+
+5
+00:00:26,850 --> 00:00:32,645
+The stacked score is compared with the saved threshold, about zero point seven eight seven.
+
+6
+00:00:32,645 --> 00:00:38,650
+This is an alert ranking score, not proof of fraud or a reliable individual probability.
+
+7
+00:00:41,450 --> 00:00:47,500
+Creating a case records the transaction, model version, score, actor, and timestamp.
+
+8
+00:00:47,500 --> 00:00:51,291
+I add an assignment rationale and start a human review.
+
+9
+00:00:51,291 --> 00:00:57,416
+The case now has an owner and a new version, with both transitions visible in its event history.
+
+10
+00:00:57,416 --> 00:01:00,242
+No regulatory decision has been made.
+
+11
+00:01:03,450 --> 00:01:09,025
+I attach a model observation through the local evidence utility, then inspect it in the dashboard.
+
+12
+00:01:09,025 --> 00:01:13,263
+This is recorded model output, not an AI-generated narrative.
+
+13
+00:01:13,263 --> 00:01:16,874
+The integrity check verifies the linked file and event chain.
+
+14
+00:01:16,874 --> 00:01:22,284
+These hashes detect ordinary tampering. External audit anchoring remains future work.
+
+15
+00:01:23,450 --> 00:01:33,692
+The retained historical evaluation gave ensemble precision-recall AUC of point seven seven seven in development, dropping to point six seven one on the later tail.
+
+16
+00:01:33,692 --> 00:01:37,635
+The velocity forest ranked slightly better in both windows.
+
+17
+00:01:37,635 --> 00:01:41,020
+These are not measurements from the revised training code.
+
+18
+00:01:41,020 --> 00:01:46,961
+The later tail is not a pristine external test, so independent validation is still needed.
+
+19
+00:01:48,450 --> 00:01:53,138
+All transactions are public synthetic data, not Canadian banking records.
+
+20
+00:01:53,138 --> 00:01:57,990
+Bedrock drafting and S3 archiving are optional and were not exercised in this recording.
+
+21
+00:01:57,990 --> 00:02:03,464
+Real institution data, operational security, and institutional approval remain future work.
+
+22
+00:02:05,450 --> 00:02:10,446
+A traceable path from model alert to human review, with explicit limits.
+
+23
+00:02:10,446 --> 00:02:16,006
+This is a portfolio prototype, not a production or regulatory compliance claim.

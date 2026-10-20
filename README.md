@@ -12,6 +12,27 @@ The models originate from an MSc capstone (*Feature-Enhanced Machine Learning Mo
 for Credit Card Fraud Detection*, Memorial University of Newfoundland); this repo is
 the data-engineering, serving and reporting layer built around them.
 
+## Watch the walkthrough (2:17)
+
+Real application footage with Remotion graphics: model-scored alerts, case review,
+and evidence verification, using public synthetic transactions. Recorded from the
+[portfolio development build](https://github.com/haseebkn/aegisagent/pull/6);
+that application update is separate from this video publication. Historical model
+metrics are not a fresh training run. Cloud integrations were not exercised, and
+this demonstration is not evidence of production readiness or regulatory compliance.
+
+https://github.com/user-attachments/assets/bf3461e3-96d8-4d42-baf9-cb2939137cc1
+
+<details>
+<summary>Linked thumbnail and text alternatives</summary>
+
+[![Watch the AegisAgent portfolio walkthrough (2 minutes 17 seconds)](docs/media/aegisagent-walkthrough-thumbnail.png)](https://github.com/user-attachments/assets/bf3461e3-96d8-4d42-baf9-cb2939137cc1)
+
+[Read the transcript](docs/media/aegisagent-walkthrough-transcript.txt) ·
+[Download captions](docs/media/aegisagent-walkthrough.srt)
+
+</details>
+
 ---
 
 ## Current temporal evaluation

@@ -1,0 +1,23 @@
+AegisAgent | revised 2:17 portfolio walkthrough
+Synthetic narration: Microsoft Zira Desktop. Original saved models and public synthetic transactions.
+
+000s / FROM CAPSTONE TO CASEWORK
+AegisAgent extends my Memorial University data science capstone into a fraud investigation prototype. This recording uses the original saved models and public synthetic transactions, with isolated demonstration cases.
+
+014s / 01 / ACTUAL MODEL ALERTS
+The dashboard scores the complete development window and keeps the top two hundred threshold-breaching alerts. Changing the selection updates the transaction profile and all three component model scores. The stacked score is compared with the saved threshold, about zero point seven eight seven. This is an alert ranking score, not proof of fraud or a reliable individual probability.
+
+041s / 02 / HUMAN REVIEW
+Creating a case records the transaction, model version, score, actor, and timestamp. I add an assignment rationale and start a human review. The case now has an owner and a new version, with both transitions visible in its event history. No regulatory decision has been made.
+
+063s / 03 / EVIDENCE INTEGRITY
+I attach a model observation through the local evidence utility, then inspect it in the dashboard. This is recorded model output, not an A I generated narrative. The integrity check verifies the linked file and event chain. These hashes detect ordinary tampering. External audit anchoring remains future work.
+
+083s / 04 / THE RESULTS, WITH CONTEXT
+The retained historical evaluation gave ensemble precision recall A U C of point seven seven seven in development, dropping to point six seven one on the later tail. The velocity forest ranked slightly better in both windows. These are not measurements from the revised training code. The later tail is not a pristine external test, so independent validation is still needed.
+
+108s / 05 / WHERE THE DEMO STOPS
+All transactions are public synthetic data, not Canadian banking records. Bedrock drafting and S three archiving are optional and were not exercised in this recording. Real institution data, operational security, and institutional approval remain future work.
+
+125s / ENGINEERING EVIDENCE / NOT A DEPLOYMENT CLAIM
+A traceable path from model alert to human review, with explicit limits. This is a portfolio prototype, not a production or regulatory compliance claim.
