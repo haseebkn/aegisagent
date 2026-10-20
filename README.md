@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/bf3461e3-96d8-4d42-baf9-cb2939137cc1
 <details>
 <summary>Linked thumbnail and text alternatives</summary>
 
-[![Watch the AegisAgent portfolio walkthrough (2 minutes 17 seconds)](docs/media/aegisagent-walkthrough-thumbnail.png)](https://github.com/user-attachments/assets/bf3461e3-96d8-4d42-baf9-cb2939137cc1)
+[![Watch the AegisAgent portfolio walkthrough (2 minutes 17 seconds)](docs/media/aegisagent-walkthrough-thumbnail.png)](https://github.com/haseebkn/aegisagent/issues/7)
 
 [Read the transcript](docs/media/aegisagent-walkthrough-transcript.txt) ·
 [Download captions](docs/media/aegisagent-walkthrough.srt)
